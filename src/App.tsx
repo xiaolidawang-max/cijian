@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, BookOpen, ChevronDown, ChevronRight, Eye, EyeOff, ImageOff, Keyboard, List, Maximize2, MoreHorizontal, Pause, RotateCcw, Search, Settings2, Star, Volume2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, BookOpen, ChevronDown, ChevronRight, Eye, EyeOff, ImageOff, Keyboard, List, Maximize2, MoreHorizontal, Pause, RotateCcw, Search, Star, Volume2, X } from 'lucide-react'
 import { assetUrl, chapters as originalChapters, words as originalWords } from './data'
 import type { Course, CourseWord } from './workbench'
 import { FAVORITES_KEY, OPTIONS_KEY, POSITION_KEY, parseStudyBackup, restoreStudyBackup } from './studyBackup'
@@ -97,7 +97,6 @@ export default function App() {
   const results = useRef<HTMLDivElement | null>(null)
   const activeResult = useRef<HTMLButtonElement | null>(null)
   const initialFocus = useRef(false)
-  const courseTag = useRef('')
   const swipe = useRef<{ x: number; y: number; at: number; id: number } | null>(null)
   const suppressImageTapUntil = useRef(0)
   const backupInput = useRef<HTMLInputElement | null>(null)
@@ -295,61 +294,26 @@ export default function App() {
 
   useEffect(() => {
     let active = true
-    const timer = window.setInterval(() => {
-      void fetch(publicPath('/uploads/tatoeba-examples.json'), { cache:'no-store' }).then(response => response.ok ? response.json() : null).then((value: {version?:number; complete?:boolean} | null) => {
-        if (!active || value?.version !== 1) return
-        setResources(current => ({ ...current, tatoeba:value }))
-        if (value.complete) window.clearInterval(timer)
-      }).catch(() => {})
-    }, 60_000)
-    return () => { active = false; window.clearInterval(timer) }
-  }, [])
-
-  useEffect(() => {
-    let active = true
-    const timer = window.setInterval(() => {
-      void fetch(publicPath('/uploads/tatoeba-english-examples.json'), { cache:'no-store' }).then(response => response.ok ? response.json() : null).then((value: {version?:number; complete?:boolean; reviewed?:boolean} | null) => {
-        if (!active || value?.version !== 1) return
-        setResources(current => ({ ...current, tatoebaEnglish:value }))
-        if (value.complete && value.reviewed) window.clearInterval(timer)
-      }).catch(() => {})
-    }, 60_000)
-    return () => { active = false; window.clearInterval(timer) }
-  }, [])
-
-  useEffect(() => {
-    let active = true
-    let inFlight = false
-    let controller: AbortController | null = null
-    const refresh = async () => {
-      if (inFlight) return
-      inFlight = true
-      const request = new AbortController()
-      controller = request
-      const timeout = window.setTimeout(() => request.abort(), 10_000)
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 10_000)
+    const loadCourse = async () => {
       try {
-        const response = await fetch(import.meta.env.MODE === 'static' ? publicPath('/course.json') : '/api/course', { cache:'no-store', signal:request.signal,
-          headers:courseTag.current ? { 'If-None-Match':courseTag.current } : {} })
-        if (response.status === 304) { if (active) setOnline(true); return }
+        const response = await fetch(publicPath('/course.json'), { signal:controller.signal })
         if (!response.ok) throw new Error('课程暂时无法读取。')
         const value: { course:Course } = await response.json()
         if (!value.course || !Array.isArray(value.course.chapters) || !value.course.chapters.length || !Array.isArray(value.course.words)) throw new Error('课程格式无效。')
-        if (import.meta.env.MODE === 'static') value.course.words = value.course.words.map(word => ({ ...word, imageUrl:publicPath(word.imageUrl), imageZoomUrl:word.imageZoomUrl ? publicPath(word.imageZoomUrl) : '', audioUrl:word.audioUrl ? publicPath(word.audioUrl) : '' }))
+        value.course.words = value.course.words.map(word => ({ ...word, imageUrl:publicPath(word.imageUrl), imageZoomUrl:word.imageZoomUrl ? publicPath(word.imageZoomUrl) : '', audioUrl:word.audioUrl ? publicPath(word.audioUrl) : '' }))
         if (active) {
-          courseTag.current = response.headers.get('ETag') || ''
           setCourse(value.course)
           setSelectedId(id => value.course.words.some(word => word.id === id && !word.archived) ? id : value.course.words.find(word => !word.archived)?.id || id)
           setOnline(true)
           setLoaded(true)
         }
       } catch { if (active) setOnline(false) }
-      finally { window.clearTimeout(timeout); if (controller === request) controller = null; inFlight = false }
+      finally { window.clearTimeout(timeout) }
     }
-    void refresh()
-    const timer = window.setInterval(() => void refresh(), 30000)
-    const onFocus = () => void refresh()
-    window.addEventListener('focus', onFocus)
-    return () => { active = false; controller?.abort(); window.clearInterval(timer); window.removeEventListener('focus', onFocus) }
+    void loadCourse()
+    return () => { active = false; controller.abort(); window.clearTimeout(timeout) }
   }, [])
 
   useEffect(() => {
@@ -418,7 +382,7 @@ export default function App() {
   </button>
 
   if (!loaded && online) return <div className="st-empty-page" role="status"><BookOpen size={32}/><h1>正在加载课程</h1><p>请稍候，正在读取你的词库。</p></div>
-  if (!card || !chapter) return <div className="st-empty-page"><BookOpen size={32}/><h1>课程还没有可学习的词条</h1><a href="/admin">打开工作台添加内容</a></div>
+  if (!card || !chapter) return <div className="st-empty-page"><BookOpen size={32}/><h1>暂时没有可学习的词条</h1><p>请检查词库文件后刷新页面。</p></div>
 
   return <div className={'st-shell' + (options.largeText ? ' st-large-text' : '') + (dialog === 'review' ? ' st-review-active' : '')}>
     <a className="st-skip" href="#study-content">跳到当前词卡</a>
@@ -426,7 +390,7 @@ export default function App() {
       {readingBar && <div className="st-reading-bar"><strong>{card.word}</strong><button className="st-icon" aria-label={chineseVisible ? '隐藏当前词的中文' : '查看当前词的中文'} aria-pressed={chineseVisible} onClick={() => setAnswerOverride({ id: card.id, show: !chineseVisible })}>{chineseVisible ? <EyeOff size={18}/> : <Eye size={18}/>}</button><button className={'st-play' + (playing ? ' playing' : '')} disabled={!card.audioUrl} aria-label={playing ? '停止读音' : '播放 ' + card.word + ' 的读音'} onClick={() => { initialFocus.current = true; if (playing) stopAudio(); else playAudio() }}>{playing ? <Pause size={17}/> : <Volume2 size={18}/>}<span>{playing ? '播放中' : '听读音'}</span></button></div>}
       <main className="st-main" ref={main} id="study-content" tabIndex={-1}>
         <div className="st-content">
-          {!online && <p className="st-notice" role="status">{loaded ? '连接暂时中断，正在显示已载入的课程。重新连接后会自动更新。' : '课程服务暂不可用，目前显示的是内置示例词条。请启动工作台后重试。'}</p>}
+          {!online && <p className="st-notice" role="status">词库加载失败，请刷新页面重试。</p>}
           {storageError && <p className="st-notice" role="alert">浏览器未能保存学习记录，本次仍可继续浏览。</p>}
           <div className="st-reading-grid">
             <div className="st-card-column">
@@ -511,7 +475,7 @@ export default function App() {
         <div className="st-review-stats"><span><strong>{reviewedCount}</strong>已练过</span><span><strong>{dueCount}</strong>到期复习</span><span><strong>{newCount}</strong>未练习</span></div>
         <p>今天已练 {todayCount} 个词。{!availableReview.length && nextDue ? ' 下次复习：' + new Date(nextDue).toLocaleString('zh-CN', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : ''}</p>
         <p>本轮可练习 {availableReview.length} 个词。</p>
-        {!loaded && <p role="status">正在等待完整课程，连接工作台后即可开始练习。</p>}
+        {!loaded && <p role="status">词库加载后即可开始练习。</p>}
         <button className="st-review-primary" disabled={!loaded || !availableReview.length} onClick={beginReview}>开始练习</button>
       </div> : reviewCard ? <div className="st-review" aria-live="polite">
         <p>第 {reviewStep + 1} / {reviewQueue.length} 词 · 看中文，回忆英文</p>
@@ -531,13 +495,13 @@ export default function App() {
       </div>
       <p className="st-dialog-foot">{storageError ? '浏览器未能保存设置，本次使用仍有效。' : '设置会自动保存，下次打开继续使用。'}</p>
       <section className="st-backup" aria-label="学习记录备份">
-        <strong>学习记录备份</strong><p>保存或恢复学习位置、收藏、复习记录和设置。课程和图片请在管理后台备份。</p>
+        <strong>学习记录备份</strong><p>保存或恢复学习位置、收藏、复习记录和设置。</p>
         <div className="st-backup-actions"><button disabled={!loaded} onClick={exportProgress}>导出学习记录</button><button disabled={!loaded} onClick={() => backupInput.current?.click()}>选择备份文件</button><input ref={backupInput} type="file" accept=".json,application/json" hidden onChange={event => void chooseBackup(event.target.files?.[0])}/></div>
-        {!loaded && <p>连接完整课程后可备份学习记录。</p>}
+        {!loaded && <p>词库加载后可备份学习记录。</p>}
         {pendingBackup && <div className="st-backup-confirm"><p>将恢复 {pendingBackup.favorites.length} 个收藏，并替换当前学习位置、设置{pendingBackup.reviews ? '和复习记录' : '（旧版备份不改变复习记录）'}。{pendingBackup.favorites.some(id => !words.some(word => word.id === id)) ? '部分收藏不在当前课程中，仍会保留在记录里。' : ''}</p><div className="st-backup-actions"><button onClick={confirmBackup}>确认恢复</button><button onClick={() => setPendingBackup(null)}>取消</button></div></div>}
         {backupMessage && <p role="status">{backupMessage}</p>}
       </section>
-      <div className="st-settings-links"><button onClick={() => setDialog('keys')}><Keyboard size={17}/>键盘快捷键</button><a href="/admin"><Settings2 size={17}/>管理课程<ChevronRight size={15}/></a></div>
+      <div className="st-settings-links"><button onClick={() => setDialog('keys')}><Keyboard size={17}/>键盘快捷键</button></div>
     </StudyDialog>}
   </div>
 }
