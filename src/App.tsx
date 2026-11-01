@@ -114,10 +114,19 @@ export default function App() {
   const starred = favorites.includes(card?.id)
   const position = chapterIndex + 1
   const progress = chapterWords.length ? position / chapterWords.length * 100 : 0
+  const searchIndex = useMemo(() => {
+    const index = new Map<string, string>()
+    for (const word of words) {
+      const content = resourcesLoaded ? buildStudyContent(word, resources.atlas, resources.ecdict, resources.phrases, resources.wordnet, resources.tatoeba, resources.wordnetDefinitions, resources.wiktionary, resources.tatoebaEnglish) : null
+      const text = [word.word, word.meaningZh, ...word.phrases, ...word.phraseTranslations, ...(content?.senses.map(sense => sense.meaning) || []), ...(content?.phrases.flatMap(phrase => [phrase.en, phrase.zh]) || [])]
+      index.set(word.id, text.join('\n').toLocaleLowerCase())
+    }
+    return index
+  }, [words, resources, resourcesLoaded])
   const visibleResults = useMemo(() => {
     const term = query.trim().toLocaleLowerCase()
-    return words.filter(word => (!favoritesOnly || favorites.includes(word.id)) && (searchChapter === 'all' || word.chapter === searchChapter) && (!term || [word.word, word.meaningZh, ...word.phrases, ...word.phraseTranslations].some(text => text.toLocaleLowerCase().includes(term))))
-  }, [words, query, searchChapter, favoritesOnly, favorites])
+    return words.filter(word => (!favoritesOnly || favorites.includes(word.id)) && (searchChapter === 'all' || word.chapter === searchChapter) && (!term || searchIndex.get(word.id)?.includes(term)))
+  }, [words, query, searchChapter, favoritesOnly, favorites, searchIndex])
   const favoriteCount = words.filter(word => favorites.includes(word.id)).length
   const resultPages = Math.max(1, Math.ceil(visibleResults.length / RESULT_PAGE_SIZE))
   const currentResultPage = Math.min(resultPage, resultPages - 1)
@@ -411,8 +420,8 @@ export default function App() {
                 if (target) { suppressImageTapUntil.current = Date.now() + 400; goTo(target.id) }
               }}>
                 <header className="st-card-tools">
-                  <button className="st-chapter-chip" aria-label="打开当前章节目录" onClick={() => openFinder(chapter.id)}><span>{chapter.name}</span><ChevronDown size={13}/></button>
-                  <div><button className="st-icon" aria-label="回忆练习" title="回忆练习" onClick={openReview}><RotateCcw size={18}/></button><button className="st-icon st-favorite" aria-label={starred ? '取消收藏单词' : '收藏单词'} aria-pressed={starred} onClick={toggleFavorite}><Star size={19} fill={starred ? 'currentColor' : 'none'}/></button><button className="st-icon st-card-menu" aria-label="学习设置" onClick={() => setDialog('settings')}><MoreHorizontal size={22}/></button></div>
+                  <div className="st-card-identity"><span className="st-brand">词间</span><button className="st-chapter-chip" aria-label="打开当前章节目录" onClick={() => openFinder(chapter.id)}><span>{chapter.name}</span><ChevronDown size={13}/></button></div>
+                  <div><button className="st-review-entry" aria-label="回忆练习" onClick={openReview}><RotateCcw size={16}/><span>回忆练习</span></button><button className="st-icon st-favorite" aria-label={starred ? '取消收藏单词' : '收藏单词'} aria-pressed={starred} onClick={toggleFavorite}><Star size={19} fill={starred ? 'currentColor' : 'none'}/></button><button className="st-icon st-card-menu" aria-label="学习设置" onClick={() => setDialog('settings')}><MoreHorizontal size={22}/></button></div>
                 </header>
                 <div className="st-card-position"><span><strong>{pad(position)}</strong> / {pad(chapterWords.length)}</span><div role="progressbar" aria-label="本章浏览位置" aria-valuemin={0} aria-valuemax={chapterWords.length} aria-valuenow={position}><i style={{ width: progress + '%' }}/></div><button className="st-language" aria-label={chineseVisible ? '隐藏当前词的中文' : '查看当前词的中文'} onClick={() => setAnswerOverride({ id: card.id, show: !chineseVisible })}>{chineseVisible ? <EyeOff size={15}/> : <Eye size={15}/>}<span>{chineseVisible ? '隐藏中文' : '显示中文'}</span></button></div>
                 <div className="st-illustration">
@@ -429,7 +438,7 @@ export default function App() {
             </div>
 
             <aside className="st-context" aria-label="搭配与例句">
-              <header><h2>用法与例句</h2><span>学会怎么用</span></header>
+              <header><h2>用法与例句</h2></header>
               <section className="st-context-section"><h3><span className="st-section-label">常用搭配</span><span>{study?.phrases.length || 0} 组</span></h3><div className="st-phrases">{study?.phrases.length ? study.phrases.map((phrase, i) => <div key={i}><span className="st-phrase-dot"/><div><p lang="en">{phrase.en}</p>{chineseVisible && phrase.zh && <small>{phrase.zh}</small>}</div></div>) : <p className="st-unavailable">{resourcesLoaded ? '暂无可用搭配。' : '正在加载词典…'}</p>}</div></section>
               <section className="st-context-section"><h3><span className="st-section-label">语境例句</span></h3>{study?.examples.length ? <div className="st-examples">{study.examples.map((example,i) => <blockquote key={i}><p lang="en">{example.en}</p>{chineseVisible && example.zh && <footer>{example.zh}</footer>}{example.source === 'wordnet' && <small className="st-example-source">词典用法示例</small>}{example.source === 'tatoeba' && <small className="st-example-source">例句：<a href={'https://tatoeba.org/en/sentences/show/' + example.enId} target="_blank" rel="noreferrer">{example.enAuthor}</a>（{example.enLicense}）{example.zhId && <> · 译文：<a href={'https://tatoeba.org/en/sentences/show/' + example.zhId} target="_blank" rel="noreferrer">{example.zhAuthor}</a>（{example.zhLicense}）</>}</small>}</blockquote>)}</div> : <p className="st-unavailable">{resourcesLoaded ? '暂无可用例句。' : '正在加载词典…'}</p>}</section>
               {chineseVisible && card.note && card.note !== card.definitionZh && <section className="st-context-section st-note"><h3><span className="st-section-label">补充说明</span></h3><p>{card.note}</p></section>}
@@ -467,14 +476,14 @@ export default function App() {
     </StudyDialog>}
     {dialog === 'keys' && <StudyDialog title="用键盘继续学习" close={() => setDialog(null)}><div className="st-key-list"><p><span>上一个 / 下一个单词</span><span><kbd>←</kbd> <kbd>→</kbd></span></p><p><span>播放 / 停止读音</span><kbd>Space</kbd></p><p><span>搜索全书</span><span><kbd>Ctrl K</kbd> / <kbd>/</kbd></span></p><p><span>关闭窗口</span><kbd>Esc</kbd></p></div><p className="st-dialog-foot">输入文字或操作按钮时，按键优先用于当前控件。</p></StudyDialog>}
     {dialog === 'review' && <StudyDialog title="回忆练习" close={() => { stopAudio(); setDialog(null) }}>
-      {reviewQueue === null ? <div className="st-review">
-        <p>先看中文回忆英文，揭晓后自己判断。每次最多练习 20 个。</p>
+      {reviewQueue === null ? <div className="st-review st-review-setup">
+        <p className="st-review-intro">{reviewMode === 'spelling' ? '看中文，输入英文拼写。' : '先看中文回忆英文，揭晓后自己判断。'}每次最多练习 20 个词。</p>
         <label>练习范围<select aria-label="练习范围" value={reviewScope} onChange={event => setReviewScope(event.target.value)}><option value="chapter">当前章节 · {chapter.name}</option><option value="all">全书</option><option value="favorites">我的收藏 · {favoriteCount} 词</option></select></label>
         <label>选词方式<select aria-label="选词方式" value={reviewFilter} onChange={event => setReviewFilter(event.target.value as 'mixed' | 'due' | 'new')}><option value="mixed">到期优先，再学新词</option><option value="due">只复习到期词</option><option value="new">只练未学过的词</option></select></label>
         <label>练习方式<select aria-label="练习方式" value={reviewMode} onChange={event => setReviewMode(event.target.value as 'recall' | 'spelling')}><option value="recall">回忆后自评</option><option value="spelling">输入英文拼写</option></select></label>
         <div className="st-review-stats"><span><strong>{reviewedCount}</strong>已练过</span><span><strong>{dueCount}</strong>到期复习</span><span><strong>{newCount}</strong>未练习</span></div>
-        <p>今天已练 {todayCount} 个词。{!availableReview.length && nextDue ? ' 下次复习：' + new Date(nextDue).toLocaleString('zh-CN', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : ''}</p>
-        <p>本轮可练习 {availableReview.length} 个词。</p>
+        <p className="st-review-summary"><span>今天已练 {todayCount} 个词</span><span>本轮可练 {availableReview.length} 个词</span></p>
+        {!availableReview.length && nextDue && <p>下次复习：{new Date(nextDue).toLocaleString('zh-CN', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' })}</p>}
         {!loaded && <p role="status">词库加载后即可开始练习。</p>}
         <button className="st-review-primary" disabled={!loaded || !availableReview.length} onClick={beginReview}>开始练习</button>
       </div> : reviewCard ? <div className="st-review" aria-live="polite">
