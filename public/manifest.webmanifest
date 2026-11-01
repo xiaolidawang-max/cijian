@@ -1,0 +1,19 @@
+{
+  "name": "词间 · IELTS 图文词汇",
+  "short_name": "词间",
+  "description": "看图、听音、轻松掌握 IELTS 词汇。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef8fb",
+  "theme_color": "#0ab99b",
+  "icons": [
+    {
+      "src": "./app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
