@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, BookOpen, ChevronDown, ChevronRight, Eye, EyeOff, ImageOff, Keyboard, List, Maximize2, MoreHorizontal, Pause, RotateCcw, Search, Star, Volume2, X } from 'lucide-react'
+import type { CSSProperties, ReactNode } from 'react'
+import { ArrowLeft, ArrowRight, BookOpen, ChevronDown, ChevronRight, Eye, EyeOff, ImageOff, Keyboard, List, Maximize2, Pause, RotateCcw, Search, Settings, Star, Volume2, X } from 'lucide-react'
 import { assetUrl, chapters as originalChapters, words as originalWords } from './data'
 import type { Course, CourseWord } from './workbench'
 import { FAVORITES_KEY, OPTIONS_KEY, POSITION_KEY, parseStudyBackup, restoreStudyBackup } from './studyBackup'
-import type { StudyBackup } from './studyBackup'
-import { REVIEW_KEY, makeReviewQueue, normalizeSpelling, readReviewRecords, scheduleReview } from './studyReview'
-import { loadReferenceDictionary } from './referenceDictionary'
+import type { StudyBackup, StudyOptions } from './studyBackup'
+import { readReviewRecords } from './studyReview'
+import { readChapterPositions, readReviewSession, savePosition, toggleFavorite as saveFavorite, updateOptions, subscribeStudyChanges, withStudyLock } from './studyStorage'
 import { buildStudyContent } from './studyContent'
 import { publicPath } from './publicPath'
+import Home from './Home'
+import BookLibrary from './BookLibrary'
+import WordContext from './WordContext'
+import StudySidebar from './StudySidebar'
 import './study.css'
 
 const seed: Course = {
@@ -16,52 +20,63 @@ const seed: Course = {
   words: originalWords.map(word => ({ ...word, imageUrl: assetUrl(word.chapter === 'plants' ? 'study-images' : 'images', word.image), audioUrl: word.audio ? assetUrl('audio', word.audio) : '', imageName: word.image, audioName: word.audio || '', reviewed: false, archived: false })),
 }
 function readPosition() {
-  try { return localStorage.getItem(POSITION_KEY) || 'photosynthesis' } catch { return 'photosynthesis' }
+  try { return localStorage.getItem(POSITION_KEY) || '' } catch { return '' }
 }
 function readFavorites(): string[] {
   try { const value: unknown = JSON.parse(localStorage.getItem(FAVORITES_KEY) || '[]'); return Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === 'string'))] : [] } catch { return [] }
 }
-function readOptions() {
+function readOptions(): StudyOptions {
   try {
     const value = JSON.parse(localStorage.getItem(OPTIONS_KEY) || '{}')
-    return { chinese: value.chinese !== false, auto: value.auto === true, speed: value.speed === 0.8 ? 0.8 : 1, largeText: value.largeText === true }
+    return { chinese: value.chinese !== false, auto: value.auto === true, speed: value.speed === 0.8 ? 0.8 : 1, largeText: value.largeText === true, imageSize: value.imageSize === 240 || value.imageSize === 360 ? value.imageSize : 300 }
   } catch { return { chinese: true, auto: false, speed: 1, largeText: false } }
 }
 const pad = (value: number) => String(value).padStart(2, '0')
 const RESULT_PAGE_SIZE = 60
+type StudyPage = 'library' | 'chapters' | 'study'
+// Use a representative topic image, rather than whichever word happens to be first.
+const chapterCovers:Record<string,string> = { geography:'atmosphere', plants:'vegetation', ch03:'wildlife', ch04:'galaxy', ch05:'university', ch06:'technology', ch07:'civilisation', ch08:'language', ch09:'stadium', ch10:'material', ch11:'fashion', ch12:'diet', ch13:'architecture', ch14:'travel', ch15:'government', ch16:'market', ch17:'law', ch18:'battle', ch19:'couple', ch20:'act', ch21:'brain', ch22:'dawn' }
 
 interface PhotoFrame { url:string; left:number; top:number; width:number; height:number; background:string }
 type StudyResources = { atlas:unknown; ecdict:unknown; phrases:unknown; wordnet:unknown; wordnetDefinitions:unknown; wiktionary:unknown; tatoeba:unknown; tatoebaEnglish:unknown; frames:Record<string, PhotoFrame> }
 const emptyResources: StudyResources = { atlas:null, ecdict:null, phrases:null, wordnet:null, wordnetDefinitions:null, wiktionary:null, tatoeba:null, tatoebaEnglish:null, frames:{} }
-function WordIllustration({ card, retry, failed, frames, sourceUrl, decorative = false }: { card:CourseWord; retry:number; failed:()=>void; frames:Record<string, PhotoFrame>; sourceUrl?:string; decorative?:boolean }) {
+function WordIllustration({ card, retry, failed, frames, sourceUrl, decorative = false, cropPhoto = false, overlay }: { card:CourseWord; retry:number; failed:()=>void; frames:Record<string, PhotoFrame>; sourceUrl?:string; decorative?:boolean; cropPhoto?:boolean; overlay?:ReactNode }) {
   const frame = card.imageFrame
   const rounded = frames[card.id]
   const alt = decorative ? '' : card.imageAlt || card.word + ' 插画'
-  if (!frame && rounded?.url === card.imageUrl && rounded.width > 0 && rounded.height > 0) return <span className="st-art-canvas" style={{ background:rounded.background }}><span className="st-art-frame" style={{ left:rounded.left * 100 + '%', top:rounded.top * 100 + '%', width:rounded.width * 100 + '%', height:rounded.height * 100 + '%' }}><img key={card.id + '-' + retry} src={sourceUrl || card.imageUrl} alt={alt} draggable={false} onError={failed} style={{ width:100 / rounded.width + '%', height:100 / rounded.height + '%', left:-100 * rounded.left / rounded.width + '%', top:-100 * rounded.top / rounded.height + '%' }}/></span></span>
+  if (cropPhoto && !frame && rounded?.url === card.imageUrl && rounded.width > 0 && rounded.height > 0) return <span className="st-image-crop" style={{ width:'min(100%,calc(var(--st-image-height) * ' + rounded.width / rounded.height + '))', aspectRatio:rounded.width / rounded.height }}><img key={card.id + '-' + retry} src={sourceUrl || card.imageUrl} alt={alt} draggable={false} onError={failed} style={{ width:100 / rounded.width + '%', height:100 / rounded.height + '%', left:-100 * rounded.left / rounded.width + '%', top:-100 * rounded.top / rounded.height + '%' }}/>{overlay}</span>
+  if (!frame && rounded?.url === card.imageUrl && rounded.width > 0 && rounded.height > 0) return <span className="st-art-canvas" style={{ background:rounded.background }}><span className="st-art-frame" style={{ left:rounded.left * 100 + '%', top:rounded.top * 100 + '%', width:rounded.width * 100 + '%', height:rounded.height * 100 + '%' }}><img key={card.id + '-' + retry} src={sourceUrl || card.imageUrl} alt={alt} draggable={false} onError={failed} style={{ width:100 / rounded.width + '%', height:100 / rounded.height + '%', left:-100 * rounded.left / rounded.width + '%', top:-100 * rounded.top / rounded.height + '%' }}/></span>{overlay}</span>
   const picture = <img key={card.id + '-' + retry} src={sourceUrl || card.imageUrl} alt={alt} draggable={false} onError={failed} style={frame ? { width:100 / frame.width + '%', height:100 / frame.height + '%', left:-100 * frame.left / frame.width + '%', top:-100 * frame.top / frame.height + '%' } : undefined}/>
-  return frame ? <span className="st-image-crop" style={{ width:'min(100%,calc(var(--st-image-height) * ' + frame.aspectRatio + '))', aspectRatio:frame.aspectRatio }}>{picture}</span> : <span className="st-art-canvas st-whole-art">{picture}</span>
+  return frame ? <span className="st-image-crop" style={{ width:'min(100%,calc(var(--st-image-height) * ' + frame.aspectRatio + '))', aspectRatio:frame.aspectRatio }}>{picture}{overlay}</span> : <span className="st-art-canvas st-whole-art">{picture}{overlay}</span>
 }
 
-function StudyDialog({ title, children, close, wide = false, image = false }: { title: string; children: ReactNode; close: () => void; wide?: boolean; image?: boolean }) {
+function StudyDialog({ title, children, close, wide = false, image = false, className = '' }: { title: string; children: ReactNode; close: () => void; wide?: boolean; image?: boolean; className?: string }) {
   const ref = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     const dialog = ref.current
     dialog?.showModal()
     return () => dialog?.close()
   }, [])
-  return <dialog ref={ref} className={'st-dialog' + (wide ? ' wide' : '') + (image ? ' st-image-dialog' : '')} aria-labelledby="study-dialog-title" onCancel={event => { event.preventDefault(); close() }} onClick={event => { if (event.target === event.currentTarget) close() }}>
+  return <dialog ref={ref} className={'st-dialog' + (wide ? ' wide' : '') + (image ? ' st-image-dialog' : '') + (className ? ' ' + className : '')} aria-labelledby="study-dialog-title" onCancel={event => { event.preventDefault(); close() }} onClick={event => { if (event.target === event.currentTarget) close() }}>
     <div className="st-dialog-inner"><span className="st-sheet-handle" aria-hidden="true"/><header><h2 id="study-dialog-title">{title}</h2><button className="st-icon" aria-label="关闭窗口" onClick={close}><X size={20}/></button></header>{children}</div>
   </dialog>
 }
 
 export default function App() {
+  const [page, setPage] = useState<StudyPage>('library')
+  const showHome = page !== 'study'
+  const [hasStarted, setHasStarted] = useState(() => !!readPosition())
+  const [chapterPositions, setChapterPositions] = useState(readChapterPositions)
+  const [favoriteSaving, setFavoriteSaving] = useState(false)
   const [course, setCourse] = useState<Course>(seed)
   const [resources, setResources] = useState<StudyResources>(emptyResources)
   const [resourcesLoaded, setResourcesLoaded] = useState(false)
+  const [resourceErrors, setResourceErrors] = useState(0)
+  const [resourceRetry, setResourceRetry] = useState(0)
   const [selectedId, setSelectedId] = useState(readPosition)
   const [favorites, setFavorites] = useState(readFavorites)
   const [options, setOptions] = useState(readOptions)
-  const [dialog, setDialog] = useState<'find' | 'keys' | 'settings' | 'image' | 'end' | 'review' | null>(null)
+  const [dialog, setDialog] = useState<'find' | 'keys' | 'settings' | 'image' | 'end' | null>(null)
   const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [readingBar, setReadingBar] = useState(false)
   const [imageZoom, setImageZoom] = useState(false)
@@ -78,17 +93,6 @@ export default function App() {
   const [audioError, setAudioError] = useState('')
   const [pendingBackup, setPendingBackup] = useState<StudyBackup | null>(null)
   const [backupMessage, setBackupMessage] = useState('')
-  const [reviews, setReviews] = useState(readReviewRecords)
-  const [reviewScope, setReviewScope] = useState('chapter')
-  const [reviewMode, setReviewMode] = useState<'recall' | 'spelling'>('recall')
-  const [reviewFilter, setReviewFilter] = useState<'mixed' | 'due' | 'new'>('mixed')
-  const [spelling, setSpelling] = useState('')
-  const [spellingMessage, setSpellingMessage] = useState('')
-  const [reviewQueue, setReviewQueue] = useState<string[] | null>(null)
-  const [reviewStep, setReviewStep] = useState(0)
-  const [reviewRevealed, setReviewRevealed] = useState(false)
-  const [reviewError, setReviewError] = useState('')
-  const [reviewNow, setReviewNow] = useState(Date.now)
   const audio = useRef<HTMLAudioElement | null>(null)
   const optionsRef = useRef(options)
   optionsRef.current = options
@@ -100,10 +104,13 @@ export default function App() {
   const swipe = useRef<{ x: number; y: number; at: number; id: number } | null>(null)
   const suppressImageTapUntil = useRef(0)
   const backupInput = useRef<HTMLInputElement | null>(null)
+  const historyPage = useRef<StudyPage>('library')
 
   const words = useMemo(() => course.chapters.flatMap(chapter => course.words.filter(word => word.chapter === chapter.id && !word.archived)), [course])
   const index = Math.max(0, words.findIndex(word => word.id === selectedId))
   const card = words[index]
+  const photoFrame = card && resources.frames[card.id]
+  const illustrationRatio = card?.imageFrame?.aspectRatio || (photoFrame && photoFrame.url === card.imageUrl && photoFrame.width > 0 && photoFrame.height > 0 ? photoFrame.width / photoFrame.height : 1)
   const study = useMemo(() => card ? buildStudyContent(card, resources.atlas, resources.ecdict, resources.phrases, resources.wordnet, resources.tatoeba, resources.wordnetDefinitions, resources.wiktionary, resources.tatoebaEnglish) : null, [card, resources])
   const chineseVisible = answerOverride?.id === card?.id ? answerOverride?.show : options.chinese
   const chapter = course.chapters.find(item => item.id === card?.chapter) || course.chapters[0]
@@ -113,12 +120,11 @@ export default function App() {
   const next = words[index + 1]
   const starred = favorites.includes(card?.id)
   const position = chapterIndex + 1
-  const progress = chapterWords.length ? position / chapterWords.length * 100 : 0
   const searchIndex = useMemo(() => {
     const index = new Map<string, string>()
     for (const word of words) {
       const content = resourcesLoaded ? buildStudyContent(word, resources.atlas, resources.ecdict, resources.phrases, resources.wordnet, resources.tatoeba, resources.wordnetDefinitions, resources.wiktionary, resources.tatoebaEnglish) : null
-      const text = [word.word, word.meaningZh, ...word.phrases, ...word.phraseTranslations, ...(content?.senses.map(sense => sense.meaning) || []), ...(content?.phrases.flatMap(phrase => [phrase.en, phrase.zh]) || [])]
+      const text = [word.word, ...(content?.senses.length ? content.senses.map(sense => sense.meaning) : [word.meaningZh]), ...(content ? content.phrases.flatMap(phrase => [phrase.en, phrase.zh]) : [...word.phrases, ...word.phraseTranslations])]
       index.set(word.id, text.join('\n').toLocaleLowerCase())
     }
     return index
@@ -131,33 +137,59 @@ export default function App() {
   const resultPages = Math.max(1, Math.ceil(visibleResults.length / RESULT_PAGE_SIZE))
   const currentResultPage = Math.min(resultPage, resultPages - 1)
   const pagedResults = visibleResults.slice(currentResultPage * RESULT_PAGE_SIZE, (currentResultPage + 1) * RESULT_PAGE_SIZE)
-  const reviewWords = reviewScope === 'chapter' ? chapterWords : reviewScope === 'favorites' ? words.filter(word => favorites.includes(word.id)) : words
-  const availableReview = makeReviewQueue(reviewWords, reviews, reviewNow, 20, reviewFilter)
-  const reviewedCount = reviewWords.filter(word => !!reviews[word.id]).length
-  const dueCount = reviewWords.filter(word => !!reviews[word.id] && reviews[word.id].dueAt <= reviewNow).length
-  const newCount = reviewWords.filter(word => !reviews[word.id] && word.meaningZh.trim()).length
-  const dayStart = new Date(reviewNow); dayStart.setHours(0, 0, 0, 0)
-  const todayCount = reviewWords.filter(word => reviews[word.id]?.reviewedAt >= dayStart.getTime() && reviews[word.id]?.reviewedAt <= reviewNow).length
-  const nextDue = reviewWords.reduce<number | null>((earliest, word) => {
-    const due = reviews[word.id]?.dueAt
-    return due && due > reviewNow && (earliest === null || due < earliest) ? due : earliest
-  }, null)
-  const reviewCard = reviewQueue ? words.find(word => word.id === reviewQueue[reviewStep]) : undefined
 
-  function persist(key: string, value: string) {
-    try { localStorage.setItem(key, value); setStorageError(false) } catch { setStorageError(true) }
-  }
-  function changeOptions(value: Partial<typeof options>) {
-    const updated = { ...options, ...value }
-    setOptions(updated)
-    if ('chinese' in value) setAnswerOverride(null)
-    persist(OPTIONS_KEY, JSON.stringify(updated))
+  useEffect(() => subscribeStudyChanges(() => {
+    setFavorites(readFavorites())
+    setOptions(readOptions())
+    setChapterPositions(readChapterPositions())
+    setHasStarted(!!readPosition())
+    if (showHome && !dialog) setSelectedId(readPosition())
+  }), [showHome, dialog])
+
+  async function changeOptions(value: Partial<typeof options>) {
+    try {
+      setOptions(await updateOptions(value))
+      if ('chinese' in value) setAnswerOverride(null)
+      setStorageError(false)
+    } catch { setStorageError(true) }
   }
   const stopAudio = useCallback(() => {
     const player = audio.current
     if (player) { player.pause(); player.onended = null; player.onerror = null; audio.current = null }
     setPlaying(false)
   }, [])
+
+  const navigatePage = useCallback((destination:StudyPage) => {
+    stopAudio()
+    setDialog(null)
+    setReadingBar(false)
+    setPage(destination)
+  }, [stopAudio])
+
+  useEffect(() => {
+    // A fresh launch still opens Home; only page changes create browser history.
+    window.history.replaceState({ ...window.history.state, cijianPage: { page:'library', basePage:'library' } }, '')
+    const restorePage = (event: PopStateEvent) => {
+      const entry = event.state?.cijianPage
+      const basePage = entry?.basePage === 'chapters' || entry?.basePage === 'study' ? entry.basePage : entry?.home === false ? 'study' : 'library'
+      // Old review history entries return to the page beneath that removed view.
+      const destination = entry?.page === 'study' || entry?.page === 'chapters' ? entry.page : entry?.page === 'review' ? basePage : 'library'
+      historyPage.current = destination
+      stopAudio()
+      setPage(destination)
+      setDialog(null)
+      setReadingBar(false)
+    }
+    window.addEventListener('popstate', restorePage)
+    return () => window.removeEventListener('popstate', restorePage)
+  }, [stopAudio])
+
+  useEffect(() => {
+    if (historyPage.current === page) return
+    historyPage.current = page
+    window.history.pushState({ ...window.history.state, cijianPage: { page, basePage:page } }, '')
+  }, [page])
+
   const playAudioUrl = useCallback((url: string) => {
     if (!url) return
     stopAudio()
@@ -183,13 +215,16 @@ export default function App() {
     initialFocus.current = true
     stopAudio()
     setSelectedId(id)
+    setHasStarted(true)
+    setPage('study')
     setAnswerOverride(null)
     setDialog(null)
     setReadingBar(false)
-    try { localStorage.setItem(POSITION_KEY, id); setStorageError(false) } catch { setStorageError(true) }
+    const word = words.find(item => item.id === id)!
+    void savePosition(word.chapter, id, hasStarted && card ? { chapterId:card.chapter, wordId:card.id } : undefined).then(value => { setChapterPositions(value); setStorageError(false) }).catch(() => setStorageError(true))
     main.current?.scrollTo({ top: 0, behavior: 'instant' })
     window.scrollTo({ top: 0, behavior: 'instant' })
-  }, [words, stopAudio])
+  }, [words, stopAudio, hasStarted, card])
   const openFinder = useCallback((scope = chapter?.id || 'all', collection = false) => {
     setQuery('')
     setSearchChapter(scope)
@@ -198,15 +233,20 @@ export default function App() {
     setResultPage(Math.floor(Math.max(0, matches.findIndex(word => word.id === card?.id)) / RESULT_PAGE_SIZE))
     setDialog('find')
   }, [chapter?.id, words, favorites, card?.id])
-  function toggleFavorite() {
-    if (!card) return
-    const updated = starred ? favorites.filter(id => id !== card.id) : [...favorites, card.id]
-    setFavorites(updated)
-    persist(FAVORITES_KEY, JSON.stringify(updated))
+  async function toggleFavorite() {
+    if (!card || favoriteSaving) return
+    setFavoriteSaving(true)
+    try { setFavorites(await saveFavorite(card.id)); setStorageError(false) }
+    catch { setStorageError(true) }
+    finally { setFavoriteSaving(false) }
   }
 
-  function exportProgress() {
-    const backup: StudyBackup = { format:'wordspace-study-backup', version:2, exportedAt:new Date().toISOString(), position:card.id, favorites, options, reviews }
+  async function exportProgress() {
+    let backup: StudyBackup
+    try {
+      // Preserve legacy fields in exported backups without exposing the removed feature.
+      backup = await withStudyLock(() => ({ format:'wordspace-study-backup', version:3, exportedAt:new Date().toISOString(), position:readPosition() || card.id, favorites:readFavorites(), options:readOptions(), reviews:readReviewRecords(), chapterPositions:readChapterPositions(), reviewSession:readReviewSession() }))
+    } catch { setBackupMessage('暂时无法读取完整学习记录，请重试。'); return }
     const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type:'application/json' }))
     const link = document.createElement('a')
     link.href = url
@@ -227,79 +267,47 @@ export default function App() {
     } catch (error) { setBackupMessage(error instanceof Error ? error.message : '无法读取备份文件。') }
     if (backupInput.current) backupInput.current.value = ''
   }
-  function confirmBackup() {
+  async function confirmBackup() {
     if (!pendingBackup) return
     try {
-      restoreStudyBackup(localStorage, pendingBackup)
+      await restoreStudyBackup(localStorage, pendingBackup)
       stopAudio()
       setSelectedId(pendingBackup.position)
+      setHasStarted(true)
+      setChapterPositions(readChapterPositions())
       setFavorites(pendingBackup.favorites)
       setOptions(pendingBackup.options)
-      if (pendingBackup.reviews) setReviews(pendingBackup.reviews)
       setAnswerOverride(null)
       setStorageError(false)
       setPendingBackup(null)
       setBackupMessage('学习记录已恢复。')
     } catch { setBackupMessage('无法写入浏览器存储，请检查存储权限后重试。') }
   }
-  function beginReview() {
-    const queue = makeReviewQueue(reviewWords, reviews, Date.now(), 20, reviewFilter).map(word => word.id)
-    setReviewQueue(queue)
-    setReviewStep(0)
-    setReviewRevealed(false)
-    setReviewError('')
-    setAudioError('')
-    setSpelling('')
-    setSpellingMessage('')
-  }
-  function openReview() {
-    stopAudio()
-    setAudioError('')
-    setReviewQueue(null)
-    setReviewError('')
-    setDialog('review')
-  }
-  function gradeReview(remembered: boolean) {
-    if (!reviewCard) return
-    const updated = { ...reviews, [reviewCard.id]:scheduleReview(reviews[reviewCard.id], remembered, Date.now()) }
-    try { localStorage.setItem(REVIEW_KEY, JSON.stringify(updated)) }
-    catch { setReviewError('复习结果未能保存，请检查浏览器存储后重试。'); return }
-    setReviews(updated)
-    stopAudio()
-    setReviewError('')
-    setReviewRevealed(false)
-    setSpelling('')
-    setSpellingMessage('')
-    setReviewStep(value => value + 1)
-  }
-  function checkSpelling() {
-    if (!reviewCard || !spelling.trim()) { setSpellingMessage('先输入英文单词。'); return }
-    if (normalizeSpelling(spelling) === normalizeSpelling(reviewCard.word)) {
-      setSpellingMessage('拼写正确。')
-      setReviewRevealed(true)
-    } else setSpellingMessage('拼写还不对，可以再试一次，或查看答案。')
-  }
-
   useEffect(() => {
     let active = true
-    const load = async (name:string) => {
-      const response = await fetch(publicPath('/uploads/' + name), { cache:'no-store' })
-      if (!response.ok) throw new Error('参考资料暂时不可用。')
-      return response.json() as Promise<unknown>
-    }
-    void Promise.allSettled([
-      loadReferenceDictionary(), load('ecdict-reference.json'), load('course-phrases.json'),
-      load('wordnet-examples.json'), load('rounded-photo-frames.json'), load('tatoeba-examples.json'), load('wordnet-definitions.json'), load('wiktionary-definitions.json'), load('tatoeba-english-examples.json'),
-    ]).then(results => {
-      if (!active) return
-      const value = (index:number) => results[index].status === 'fulfilled' ? results[index].value : null
-      const frameData = value(4) as {version?:number; frames?:Record<string, PhotoFrame>} | null
-      const frames = frameData?.version === 1 && frameData.frames ? Object.fromEntries(Object.entries(frameData.frames).map(([id, frame]) => [id, { ...frame, url:publicPath(frame.url) }])) : {}
-      setResources({ atlas:value(0), ecdict:value(1), phrases:value(2), wordnet:value(3), tatoeba:value(5), wordnetDefinitions:value(6), wiktionary:value(7), tatoebaEnglish:value(8), frames })
-      setResourcesLoaded(true)
-    })
-    return () => { active = false }
-  }, [])
+    const controllers:AbortController[] = []
+    setResourcesLoaded(false)
+    setResourceErrors(0)
+    const files: [keyof StudyResources, string][] = [
+      ['atlas','word-atlas-reference.json'], ['ecdict','ecdict-reference.json'], ['phrases','course-phrases.json'],
+      ['wordnet','wordnet-examples.json'], ['frames','rounded-photo-frames.json'], ['tatoeba','tatoeba-examples.json'],
+      ['wordnetDefinitions','wordnet-definitions.json'], ['wiktionary','wiktionary-definitions.json'], ['tatoebaEnglish','tatoeba-english-examples.json'],
+    ]
+    void Promise.allSettled(files.map(async ([key, name]) => {
+      const controller = new AbortController()
+      controllers.push(controller)
+      const timer = window.setTimeout(() => controller.abort(), 10_000)
+      try {
+        const response = await fetch(publicPath('/uploads/' + name), { signal:controller.signal })
+        if (!response.ok) throw new Error('词典资料暂时不可用')
+        let value = await response.json()
+        if (key === 'frames') value = value?.version === 1 && value.frames ? Object.fromEntries(Object.entries(value.frames as Record<string,PhotoFrame>).map(([id, frame]) => [id, { ...frame, url:publicPath(frame.url) }])) : {}
+        if (active) setResources(previous => ({ ...previous, [key]:value }))
+      } catch { if (active) setResourceErrors(count => count + 1) }
+      finally { window.clearTimeout(timer) }
+    })).then(() => { if (active) setResourcesLoaded(true) })
+    return () => { active = false; controllers.forEach(controller => controller.abort()) }
+  }, [resourceRetry])
 
   useEffect(() => {
     let active = true
@@ -326,13 +334,6 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (dialog !== 'review') return
-    setReviewNow(Date.now())
-    const timer = window.setInterval(() => setReviewNow(Date.now()), 30_000)
-    return () => window.clearInterval(timer)
-  }, [dialog])
-
-  useEffect(() => {
     setImageError(false)
     setImageRetry(0)
     setAudioError('')
@@ -347,11 +348,11 @@ export default function App() {
     document.body.classList.add('study-page')
     return () => document.body.classList.remove('study-page')
   }, [])
-  useEffect(() => { if (card) document.title = !loaded && online ? '正在加载 · 词间' : dialog === 'review' ? '回忆练习 · 词间' : card.word + ' · 词间' }, [card?.word, dialog, loaded, online])
+  useEffect(() => { if (card) document.title = !loaded && online ? '正在加载 · 词间' : page === 'library' ? '选择词书 · 词间' : page === 'chapters' ? course.title + ' · 词间' : card.word + ' · 词间' }, [card?.word, course.title, loaded, online, page])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (dialog || event.altKey || event.repeat) return
+      if (showHome || dialog || document.querySelector('dialog[open]') || event.altKey || event.repeat) return
       const target = event.target as HTMLElement
       const editing = target.closest('input,textarea,select,[contenteditable="true"]')
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); openFinder('all'); return }
@@ -364,7 +365,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dialog, previous, next, card?.audioUrl, playing, playAudio, stopAudio, goTo, openFinder])
+  }, [showHome, dialog, previous, next, card?.audioUrl, playing, playAudio, stopAudio, goTo, openFinder])
 
   useEffect(() => {
     const root = main.current
@@ -373,7 +374,7 @@ export default function App() {
     const observer = new IntersectionObserver(([entry]) => setReadingBar(!entry.isIntersecting && entry.boundingClientRect.bottom < (entry.rootBounds?.top || 0)), { root })
     observer.observe(target)
     return () => observer.disconnect()
-  }, [card?.id, loaded, online])
+  }, [card?.id, loaded, online, showHome])
   useEffect(() => {
     if (dialog !== 'find') return
     const frame = requestAnimationFrame(() => {
@@ -386,22 +387,83 @@ export default function App() {
     return () => cancelAnimationFrame(frame)
   }, [dialog, query, searchChapter, favoritesOnly, currentResultPage])
 
-  const renderResult = (word: CourseWord) => <button key={word.id} ref={word.id === card?.id ? activeResult : undefined} aria-current={word.id === card?.id ? 'true' : undefined} className={'st-result' + (word.id === card?.id ? ' selected' : '')} aria-label={'打开单词 ' + word.word} onClick={() => goTo(word.id)}>
-    <span><strong>{word.word}</strong>{options.chinese && <small>{word.meaningZh}</small>}</span>{word.id === card?.id && <em>当前</em>}{favorites.includes(word.id) && <Star size={14} className="st-starred"/>}<ChevronRight size={15}/>
-  </button>
+  const renderResult = (word: CourseWord) => {
+    const content = buildStudyContent(word, resources.atlas, resources.ecdict, resources.phrases, resources.wordnet, resources.tatoeba, resources.wordnetDefinitions, resources.wiktionary, resources.tatoebaEnglish)
+    return <button key={word.id} ref={word.id === card?.id ? activeResult : undefined} aria-current={word.id === card?.id ? 'true' : undefined} className={'st-result' + (word.id === card?.id ? ' selected' : '')} aria-label={'打开单词 ' + word.word} onClick={() => goTo(word.id)}>
+      <span><strong>{word.word}</strong>{options.chinese && <small>{content.senses.map(sense => [sense.pos, sense.meaning].filter(Boolean).join(' ')).join(' · ')}</small>}</span>{word.id === card?.id && <em>当前</em>}{favorites.includes(word.id) && <Star size={14} className="st-starred"/>}<ChevronRight size={15}/>
+    </button>
+  }
 
   if (!loaded && online) return <div className="st-empty-page" role="status"><BookOpen size={32}/><h1>正在加载课程</h1><p>请稍候，正在读取你的词库。</p></div>
   if (!card || !chapter) return <div className="st-empty-page"><BookOpen size={32}/><h1>暂时没有可学习的词条</h1><p>请检查词库文件后刷新页面。</p></div>
 
-  return <div className={'st-shell' + (options.largeText ? ' st-large-text' : '') + (dialog === 'review' ? ' st-review-active' : '')}>
-    <a className="st-skip" href="#study-content">跳到当前词卡</a>
-    <div className="st-workspace">
-      {readingBar && <div className="st-reading-bar"><strong>{card.word}</strong><button className="st-icon" aria-label={chineseVisible ? '隐藏当前词的中文' : '查看当前词的中文'} aria-pressed={chineseVisible} onClick={() => setAnswerOverride({ id: card.id, show: !chineseVisible })}>{chineseVisible ? <EyeOff size={18}/> : <Eye size={18}/>}</button><button className={'st-play' + (playing ? ' playing' : '')} disabled={!card.audioUrl} aria-label={playing ? '停止读音' : '播放 ' + card.word + ' 的读音'} onClick={() => { initialFocus.current = true; if (playing) stopAudio(); else playAudio() }}>{playing ? <Pause size={17}/> : <Volume2 size={18}/>}<span>{playing ? '播放中' : '听读音'}</span></button></div>}
+  const notice = !online ? '完整词库暂时未能载入，目前显示内置词条。请刷新页面重试。' : storageError ? '浏览器未能保存学习记录，请检查存储设置。' : undefined
+  const home = <Home
+    title={course.title}
+    onHome={() => navigatePage('library')}
+    hasStarted={hasStarted}
+    chapter={chapter.name}
+    chapterNumber={course.chapters.findIndex(item => item.id === chapter.id) + 1}
+    chapterTotal={chapterWords.length}
+    chapterPosition={position}
+    word={card.word}
+    illustration={imageError || !card.imageUrl ? null : <WordIllustration card={card} retry={imageRetry} frames={resources.frames} failed={() => setImageError(true)} decorative cropPhoto/>}
+    totalWords={words.length}
+    chapters={course.chapters.map(item => {
+      const entries = words.filter(word => word.chapter === item.id)
+      const remembered = chapterPositions[item.id] || (hasStarted && card.chapter === item.id ? card.id : '')
+      const savedPosition = entries.findIndex(word => word.id === remembered) + 1
+      const cover = entries.find(word => word.word === chapterCovers[item.id]) || entries[0]
+      return { id:item.id, name:item.name, count:entries.length, imageUrl:cover?.imageUrl || '', savedPosition }
+    })}
+    notice={notice}
+    onStudy={() => goTo(card.id)}
+    onDirectory={() => openFinder('all')}
+    onFavorites={() => openFinder('all', true)}
+    onChapter={id => {
+      const first = words.find(word => word.chapter === id)
+      if (!first) return
+      const remembered = chapterPositions[id] || (hasStarted && chapter.id === id ? card.id : '')
+      const destination = words.find(word => word.chapter === id && word.id === remembered) || first
+      goTo(destination.id)
+    }}
+  />
+
+  const library = <BookLibrary
+    title={course.title}
+    chapterCount={course.chapters.length}
+    wordCount={words.length}
+    hasStarted={hasStarted}
+    chapter={chapter.name}
+    chapterPosition={position}
+    chapterTotal={chapterWords.length}
+    notice={notice}
+    onOpenBook={() => navigatePage('chapters')}
+    onStudy={() => goTo(card.id)}
+    onFavorites={() => openFinder('all', true)}
+    onSettings={() => setDialog('settings')}
+  />
+
+  return <>{showHome && (page === 'library' ? library : home)}<div className={'st-shell' + (options.largeText ? ' st-large-text' : '') + (showHome ? ' st-overlay-only' : '')} style={{ '--st-picture-size':(options.imageSize ?? 300) + 'px' } as CSSProperties}>
+    {!showHome && <a className="st-skip" href="#study-content">跳到当前词卡</a>}
+    <div className="st-workspace" style={{ display:showHome ? 'none' : undefined }}>
+      <header className="st-app-header">
+        <button className="st-app-brand" aria-label="返回词间主页" onClick={() => navigatePage('library')}>词间</button>
+        <nav aria-label="学习导航">
+          <button onClick={() => navigatePage('library')}>首页</button>
+          <button aria-current={dialog === 'find' && favoritesOnly ? undefined : 'page'} onClick={() => setDialog(null)}>学习</button>
+          <button aria-current={dialog === 'find' && favoritesOnly ? 'page' : undefined} onClick={() => openFinder('all', true)}>收藏</button>
+        </nav>
+        <button className="st-icon st-app-settings" aria-label="学习设置" title="学习设置" aria-haspopup="dialog" onClick={() => setDialog('settings')}><Settings size={20}/></button>
+      </header>
+      {readingBar && <div className="st-reading-bar"><strong>{card.word}</strong><button className="st-icon" aria-label={chineseVisible ? '隐藏中文' : '显示中文'} aria-pressed={chineseVisible} onClick={() => changeOptions({ chinese: !chineseVisible })}>{chineseVisible ? <EyeOff size={18}/> : <Eye size={18}/>}</button><button className={'st-play' + (playing ? ' playing' : '')} disabled={!card.audioUrl} aria-label={playing ? '停止读音' : '播放 ' + card.word + ' 的读音'} onClick={() => { initialFocus.current = true; if (playing) stopAudio(); else playAudio() }}>{playing ? <Pause size={17}/> : <Volume2 size={18}/>}<span>{playing ? '播放中' : '听读音'}</span></button></div>}
       <main className="st-main" ref={main} id="study-content" tabIndex={-1}>
         <div className="st-content">
           {!online && <p className="st-notice" role="status">词库加载失败，请刷新页面重试。</p>}
+          {!!resourceErrors && <p className="st-notice" role="status">部分词典资料未能载入。<button onClick={() => setResourceRetry(value => value + 1)}>重试</button></p>}
           {storageError && <p className="st-notice" role="alert">浏览器未能保存学习记录，本次仍可继续浏览。</p>}
           <div className="st-reading-grid">
+            <StudySidebar key={showHome ? 'home' : 'study'} chapters={course.chapters} words={words} selectedId={card.id} favorites={favorites} onSelect={goTo}/>
             <div className="st-card-column">
               <article className="st-word-card" aria-label={card.word + ' 词卡'} onTouchStart={event => {
                 const touch = event.touches[0]
@@ -420,33 +482,20 @@ export default function App() {
                 if (target) { suppressImageTapUntil.current = Date.now() + 400; goTo(target.id) }
               }}>
                 <header className="st-card-tools">
-                  <div className="st-card-identity"><span className="st-brand">词间</span><button className="st-chapter-chip" aria-label="打开当前章节目录" onClick={() => openFinder(chapter.id)}><span>{chapter.name}</span><ChevronDown size={13}/></button></div>
-                  <div><button className="st-review-entry" aria-label="回忆练习" onClick={openReview}><RotateCcw size={16}/><span>回忆练习</span></button><button className="st-icon st-favorite" aria-label={starred ? '取消收藏单词' : '收藏单词'} aria-pressed={starred} onClick={toggleFavorite}><Star size={19} fill={starred ? 'currentColor' : 'none'}/></button><button className="st-icon st-card-menu" aria-label="学习设置" onClick={() => setDialog('settings')}><MoreHorizontal size={22}/></button></div>
+                  <p className="st-card-meta">{chapter.name}<span>·</span>{position} / {chapterWords.length}</p>
+                  <div className="st-card-actions"><button className="st-icon" aria-label={chineseVisible ? '隐藏中文' : '显示中文'} title={chineseVisible ? '隐藏中文（记住选择）' : '显示中文（记住选择）'} aria-pressed={chineseVisible} onClick={() => changeOptions({ chinese: !chineseVisible })}>{chineseVisible ? <EyeOff size={17}/> : <Eye size={17}/>}</button><button className="st-icon st-favorite" aria-label={starred ? '取消收藏单词' : '收藏单词'} title={starred ? '取消收藏' : '收藏单词'} aria-pressed={starred} disabled={favoriteSaving} onClick={toggleFavorite}><Star size={22} fill={starred ? 'currentColor' : 'none'}/></button><button className="st-icon" aria-label="词卡设置" title="词卡设置" aria-haspopup="dialog" onClick={() => setDialog('settings')}><Settings size={19}/></button></div>
                 </header>
-                <div className="st-card-position"><span><strong>{pad(position)}</strong> / {pad(chapterWords.length)}</span><div role="progressbar" aria-label="本章浏览位置" aria-valuemin={0} aria-valuemax={chapterWords.length} aria-valuenow={position}><i style={{ width: progress + '%' }}/></div><button className="st-language" aria-label={chineseVisible ? '隐藏当前词的中文' : '查看当前词的中文'} onClick={() => setAnswerOverride({ id: card.id, show: !chineseVisible })}>{chineseVisible ? <EyeOff size={15}/> : <Eye size={15}/>}<span>{chineseVisible ? '隐藏中文' : '显示中文'}</span></button></div>
-                <div className="st-illustration">
-                  {imageError || !card.imageUrl ? <div className="st-image-fallback" role="status"><ImageOff size={28}/><span>{card.imageUrl ? '插画暂时无法读取' : '这张词卡还没有插画'}</span>{card.imageUrl && <button onClick={() => { setImageError(false); setImageRetry(value => value + 1) }}>重新加载</button>}</div> : <button className="st-image-open" aria-label={'放大 ' + card.word + ' 的插画'} onClick={() => { if (Date.now() < suppressImageTapUntil.current) return; setImageZoom(false); setDialog('image') }}><WordIllustration card={card} retry={imageRetry} frames={resources.frames} failed={() => setImageError(true)}/><span className="st-image-hint"><Maximize2 size={14}/>放大</span></button>}
-                </div>
+                <div className="st-card-body">
                 <div className="st-lexeme" ref={heading} aria-live="polite">
-                  <h2>{card.word}</h2>
+                  <h2 className={card.word.length > 18 ? 'st-long-word' : undefined}>{card.word}</h2>
                   <div className="st-pronunciation"><span>{card.ipa || '音标待补充'}</span><button className={'st-play' + (playing ? ' playing' : '')} aria-label={playing ? '停止读音' : '播放 ' + card.word + ' 的读音'} disabled={!card.audioUrl} onClick={() => { initialFocus.current = true; if (playing) stopAudio(); else playAudio() }}>{playing ? <Pause size={17}/> : <Volume2 size={18}/>}<span>{playing ? '播放中' : card.audioUrl ? '听读音' : '暂无读音'}</span></button></div>
-                  {chineseVisible ? <div className="st-meanings" aria-label="中文释义">{study?.senses.length ? study.senses.map((sense, i) => <div className="st-meaning-row" key={i}>{sense.pos && <span className="st-pos">{sense.pos}</span>}<span>{sense.meaning}</span></div>) : <p className="st-meaning">{card.meaningZh || '中文释义待补充'}</p>}</div> : <button className="st-reveal" onClick={() => setAnswerOverride({ id: card.id, show: true })}>查看这个词的中文<ChevronDown size={14}/></button>}
+                  <div className="st-meaning-slot">{chineseVisible ? <div className="st-meanings" aria-label="中文释义">{study?.senses.length ? study.senses.map((sense, i) => <div className="st-meaning-row" key={i}>{sense.pos && <span className="st-pos">{sense.pos}</span>}<span>{sense.meaning}</span></div>) : <p className="st-meaning">{card.meaningZh || '中文释义待补充'}</p>}</div> : <button className="st-reveal" aria-label="查看当前词释义" title="仅显示当前词，后续单词继续隐藏" onClick={() => setAnswerOverride({ id: card.id, show: true })}>查看释义<ChevronDown size={13}/></button>}</div>
                 </div>
-                <section className="st-definition" aria-label="单词释义"><span className="st-section-label">词义</span>{study?.definitions.length ? <div className="st-definition-list">{study.definitions.map((definition, i) => <div key={i}>{definition.pos && <span className="st-definition-pos">{definition.pos}</span>}<p lang="en">{definition.en}</p>{chineseVisible && definition.zh && <p className="st-translation">{definition.zh}</p>}</div>)}</div> : <p>{resourcesLoaded ? '暂无英文释义。' : '正在加载词典…'}</p>}</section>
-                {audioError && <p className="st-audio-error" role="alert">{audioError}</p>}
-              </article>
-            </div>
 
-            <aside className="st-context" aria-label="搭配与例句">
-              <header><h2>用法与例句</h2></header>
-              <section className="st-context-section"><h3><span className="st-section-label">常用搭配</span><span>{study?.phrases.length || 0} 组</span></h3><div className="st-phrases">{study?.phrases.length ? study.phrases.map((phrase, i) => <div key={i}><span className="st-phrase-dot"/><div><p lang="en">{phrase.en}</p>{chineseVisible && phrase.zh && <small>{phrase.zh}</small>}</div></div>) : <p className="st-unavailable">{resourcesLoaded ? '暂无可用搭配。' : '正在加载词典…'}</p>}</div></section>
-              <section className="st-context-section"><h3><span className="st-section-label">语境例句</span></h3>{study?.examples.length ? <div className="st-examples">{study.examples.map((example,i) => <blockquote key={i}><p lang="en">{example.en}</p>{chineseVisible && example.zh && <footer>{example.zh}</footer>}{example.source === 'wordnet' && <small className="st-example-source">词典用法示例</small>}{example.source === 'tatoeba' && <small className="st-example-source">例句：<a href={'https://tatoeba.org/en/sentences/show/' + example.enId} target="_blank" rel="noreferrer">{example.enAuthor}</a>（{example.enLicense}）{example.zhId && <> · 译文：<a href={'https://tatoeba.org/en/sentences/show/' + example.zhId} target="_blank" rel="noreferrer">{example.zhAuthor}</a>（{example.zhLicense}）</>}</small>}</blockquote>)}</div> : <p className="st-unavailable">{resourcesLoaded ? '暂无可用例句。' : '正在加载词典…'}</p>}</section>
-              {chineseVisible && card.note && card.note !== card.definitionZh && <section className="st-context-section st-note"><h3><span className="st-section-label">补充说明</span></h3><p>{card.note}</p></section>}
-              {resourcesLoaded && study?.sources.length ? <p className="st-attribution">词典参考：{study.sources.includes('atlas') && <><a href="https://github.com/designfuchen/word-atlas" target="_blank" rel="noreferrer">Word Atlas contributors</a>（<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>，节选）</>}{study.sources.includes('ecdict') && <>{study.sources.includes('atlas') ? ' · ' : ''}<a href={publicPath('/uploads/ECDICT_LICENSE.txt')} target="_blank" rel="noreferrer">ECDICT（MIT）</a></>}{study.sources.includes('wordnet') && <> · <a href={publicPath('/uploads/WORDNET_LICENSE.txt')} target="_blank" rel="noreferrer">WordNet 3.0</a></>}{study.wiktionaryUrl && <> · <a href={study.wiktionaryUrl} target="_blank" rel="noreferrer">Wiktionary（改写，CC BY-SA）</a></>}{study.sources.includes('tatoeba') && <> · <a href="https://tatoeba.org/" target="_blank" rel="noreferrer">Tatoeba</a></>}。词典内容仅供参考。</p> : null}
-            </aside>
-          </div>
-        </div>
-      </main>
+                <div className="st-illustration" style={{ aspectRatio:illustrationRatio }}>
+                  {imageError || !card.imageUrl ? <div className="st-image-fallback" role="status"><ImageOff size={28}/><span>{card.imageUrl ? '插画暂时无法读取' : '这张词卡还没有插画'}</span>{card.imageUrl && <button onClick={() => { setImageError(false); setImageRetry(value => value + 1) }}>重新加载</button>}</div> : <button className="st-image-open" aria-label={'放大 ' + card.word + ' 的插画'} onClick={() => { if (Date.now() < suppressImageTapUntil.current) return; setImageZoom(false); setDialog('image') }}><WordIllustration card={card} retry={imageRetry} frames={resources.frames} failed={() => setImageError(true)} cropPhoto overlay={<span className="st-image-hint" aria-hidden="true"><Maximize2 size={14}/></span>}/></button>}
+                </div>
+                {audioError && <p className="st-audio-error" role="alert">{audioError}</p>}
       <footer className="st-dock">
         <div className="st-dock-inner">
           <nav className="st-turner" aria-label="切换单词">
@@ -456,6 +505,15 @@ export default function App() {
           </nav>
         </div>
       </footer>
+                </div>
+              </article>
+            </div>
+
+            {!showHome && <WordContext key={card.id} content={study} chineseVisible={chineseVisible} loaded={resourcesLoaded} note={card.note !== card.definitionZh ? card.note : undefined}/>}
+          </div>
+        </div>
+      </main>
+
     </div>
 
     {dialog === 'find' && <StudyDialog title={favoritesOnly ? '我的收藏' : '章节与词条'} close={() => setDialog(null)} wide>
@@ -475,42 +533,24 @@ export default function App() {
       <div className="st-end"><BookOpen size={34}/><p>本书共 {words.length} 个词条。可以从头再看一遍，也可以去目录选择想看的章节。</p><button className="st-primary" onClick={() => goTo(words[0].id)}><RotateCcw size={18}/>从第一个开始</button><button onClick={() => openFinder('all')}><List size={18}/>回到全书目录</button></div>
     </StudyDialog>}
     {dialog === 'keys' && <StudyDialog title="用键盘继续学习" close={() => setDialog(null)}><div className="st-key-list"><p><span>上一个 / 下一个单词</span><span><kbd>←</kbd> <kbd>→</kbd></span></p><p><span>播放 / 停止读音</span><kbd>Space</kbd></p><p><span>搜索全书</span><span><kbd>Ctrl K</kbd> / <kbd>/</kbd></span></p><p><span>关闭窗口</span><kbd>Esc</kbd></p></div><p className="st-dialog-foot">输入文字或操作按钮时，按键优先用于当前控件。</p></StudyDialog>}
-    {dialog === 'review' && <StudyDialog title="回忆练习" close={() => { stopAudio(); setDialog(null) }}>
-      {reviewQueue === null ? <div className="st-review st-review-setup">
-        <p className="st-review-intro">{reviewMode === 'spelling' ? '看中文，输入英文拼写。' : '先看中文回忆英文，揭晓后自己判断。'}每次最多练习 20 个词。</p>
-        <label>练习范围<select aria-label="练习范围" value={reviewScope} onChange={event => setReviewScope(event.target.value)}><option value="chapter">当前章节 · {chapter.name}</option><option value="all">全书</option><option value="favorites">我的收藏 · {favoriteCount} 词</option></select></label>
-        <label>选词方式<select aria-label="选词方式" value={reviewFilter} onChange={event => setReviewFilter(event.target.value as 'mixed' | 'due' | 'new')}><option value="mixed">到期优先，再学新词</option><option value="due">只复习到期词</option><option value="new">只练未学过的词</option></select></label>
-        <label>练习方式<select aria-label="练习方式" value={reviewMode} onChange={event => setReviewMode(event.target.value as 'recall' | 'spelling')}><option value="recall">回忆后自评</option><option value="spelling">输入英文拼写</option></select></label>
-        <div className="st-review-stats"><span><strong>{reviewedCount}</strong>已练过</span><span><strong>{dueCount}</strong>到期复习</span><span><strong>{newCount}</strong>未练习</span></div>
-        <p className="st-review-summary"><span>今天已练 {todayCount} 个词</span><span>本轮可练 {availableReview.length} 个词</span></p>
-        {!availableReview.length && nextDue && <p>下次复习：{new Date(nextDue).toLocaleString('zh-CN', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' })}</p>}
-        {!loaded && <p role="status">词库加载后即可开始练习。</p>}
-        <button className="st-review-primary" disabled={!loaded || !availableReview.length} onClick={beginReview}>开始练习</button>
-      </div> : reviewCard ? <div className="st-review" aria-live="polite">
-        <p>第 {reviewStep + 1} / {reviewQueue.length} 词 · 看中文，回忆英文</p>
-        {reviewCard.imageUrl && <div className="st-review-illustration"><WordIllustration card={reviewCard} retry={0} frames={resources.frames} decorative failed={() => {}}/></div>}
-        <strong className="st-review-prompt">{reviewCard.meaningZh}</strong>
-        {reviewRevealed ? <><div className="st-review-answer"><strong>{reviewCard.word}</strong><span>{reviewCard.ipa}</span>{reviewCard.audioUrl && <button className="st-review-audio" aria-label={playing ? '停止读音' : '播放 ' + reviewCard.word + ' 的读音'} onClick={() => playing ? stopAudio() : playAudioUrl(reviewCard.audioUrl)}>{playing ? <Pause size={16}/> : <Volume2 size={16}/>} {playing ? '停止' : '听读音'}</button>}</div>{audioError && <p role="alert">{audioError}</p>}{spellingMessage && <p role="status">{spellingMessage}</p>}<p>刚才想起来了吗？</p><div className="st-review-actions"><button onClick={() => gradeReview(false)}>没想起 · 稍后再看</button><button onClick={() => gradeReview(true)}>想起来了</button></div></> : reviewMode === 'spelling' ? <form className="st-spelling" onSubmit={event => { event.preventDefault(); checkSpelling() }}><label htmlFor="st-spelling-input">输入英文单词</label><input id="st-spelling-input" autoFocus autoComplete="off" autoCapitalize="none" spellCheck={false} value={spelling} onChange={event => { setSpelling(event.target.value); setSpellingMessage('') }}/>{spellingMessage && <p role="status">{spellingMessage}</p>}<button className="st-review-primary" type="submit">检查拼写</button><button type="button" className="st-review-secondary" onClick={() => { setSpellingMessage(''); setReviewRevealed(true) }}>查看答案</button></form> : <button className="st-review-primary" onClick={() => setReviewRevealed(true)}>显示答案</button>}
-        {reviewError && <p role="alert">{reviewError}</p>}
-      </div> : <div className="st-review"><strong className="st-review-prompt">本轮练习完成</strong><p>已完成 {reviewStep} 个词。没想起的词约 10 分钟后可再次练习；想起来的词会逐步延长复习间隔。</p><button className="st-review-primary" onClick={() => setReviewQueue(null)}>返回练习</button></div>}
-    </StudyDialog>}
-    {dialog === 'settings' && <StudyDialog title="学习设置" close={() => setDialog(null)}>
-      <div className="st-card-shortcuts"><button onClick={openReview}><RotateCcw size={18}/>回忆练习<ChevronRight size={16}/></button><button onClick={() => openFinder('all')}><Search size={18}/>搜索词条<ChevronRight size={16}/></button><button onClick={() => openFinder(chapter.id)}><List size={18}/>本章目录<ChevronRight size={16}/></button><button onClick={() => openFinder('all', true)}><Star size={18}/>我的收藏<span className="st-count">{favoriteCount}</span><ChevronRight size={16}/></button></div>
+    {dialog === 'settings' && <StudyDialog title="学习设置" className="st-settings-dialog" close={() => setDialog(null)}>
       <div className="st-setting-list">
-        <label className="st-setting-row"><span><strong>默认显示中文</strong><small>先看英文，再点击词卡查看中文。</small></span><input type="checkbox" role="switch" checked={options.chinese} onChange={event => changeOptions({ chinese: event.target.checked })}/></label>
+        <label className="st-setting-row"><span><strong>显示中文</strong><small>与眼睛按钮同步，切词后保持。</small></span><input type="checkbox" role="switch" checked={options.chinese} onChange={event => changeOptions({ chinese: event.target.checked })}/></label>
+        <label className="st-setting-row"><span><strong>字号</strong><small>调整释义、搭配和例句的文字大小。</small></span><select aria-label="字号" value={options.largeText ? 'large' : 'normal'} onChange={event => changeOptions({ largeText: event.target.value === 'large' })}><option value="normal">标准</option><option value="large">较大</option></select></label>
+        <label className="st-setting-row"><span><strong>图片大小</strong><small>点击词卡图片仍可放大查看。</small></span><select aria-label="图片大小" value={options.imageSize ?? 300} onChange={event => changeOptions({ imageSize: Number(event.target.value) as StudyOptions['imageSize'] })}><option value={240}>较小</option><option value={300}>标准</option><option value={360}>较大</option></select></label>
         <label className="st-setting-row"><span><strong>翻词时自动播放</strong><small>切换到有读音的词条时，自动朗读。</small></span><input type="checkbox" role="switch" checked={options.auto} onChange={event => { initialFocus.current = true; changeOptions({ auto: event.target.checked }) }}/></label>
-        <label className="st-setting-row"><span><strong>大字阅读</strong><small>放大释义、搭配和例句。</small></span><input type="checkbox" role="switch" checked={options.largeText} onChange={event => changeOptions({ largeText: event.target.checked })}/></label>
-        <label className="st-setting-row"><span><strong>朗读语速</strong><small>选择适合自己的听读速度。</small></span><select aria-label="朗读语速" value={options.speed} onChange={event => changeOptions({ speed: Number(event.target.value) })}><option value={1}>正常</option><option value={0.8}>慢速 0.8×</option></select></label>
+        <label className="st-setting-row"><span><strong>朗读语速</strong></span><select aria-label="朗读语速" value={options.speed} onChange={event => changeOptions({ speed: Number(event.target.value) })}><option value={1}>正常</option><option value={0.8}>慢速 0.8×</option></select></label>
       </div>
-      <p className="st-dialog-foot">{storageError ? '浏览器未能保存设置，本次使用仍有效。' : '设置会自动保存，下次打开继续使用。'}</p>
-      <section className="st-backup" aria-label="学习记录备份">
-        <strong>学习记录备份</strong><p>保存或恢复学习位置、收藏、复习记录和设置。</p>
+      <p className="st-dialog-foot">{storageError ? '设置未能保存，请检查浏览器存储权限后重试。' : '设置会自动保存，下次打开继续使用。'}</p>
+      <details className="st-backup">
+        <summary>学习记录备份<ChevronDown size={15}/></summary>
+        <div className="st-backup-body"><p>保存或恢复学习位置、章节进度、收藏和设置。</p>
         <div className="st-backup-actions"><button disabled={!loaded} onClick={exportProgress}>导出学习记录</button><button disabled={!loaded} onClick={() => backupInput.current?.click()}>选择备份文件</button><input ref={backupInput} type="file" accept=".json,application/json" hidden onChange={event => void chooseBackup(event.target.files?.[0])}/></div>
         {!loaded && <p>词库加载后可备份学习记录。</p>}
-        {pendingBackup && <div className="st-backup-confirm"><p>将恢复 {pendingBackup.favorites.length} 个收藏，并替换当前学习位置、设置{pendingBackup.reviews ? '和复习记录' : '（旧版备份不改变复习记录）'}。{pendingBackup.favorites.some(id => !words.some(word => word.id === id)) ? '部分收藏不在当前课程中，仍会保留在记录里。' : ''}</p><div className="st-backup-actions"><button onClick={confirmBackup}>确认恢复</button><button onClick={() => setPendingBackup(null)}>取消</button></div></div>}
-        {backupMessage && <p role="status">{backupMessage}</p>}
-      </section>
+        {pendingBackup && <div className="st-backup-confirm"><p>将恢复 {pendingBackup.favorites.length} 个收藏，并替换当前学习位置和设置。{pendingBackup.version < 3 ? '这份旧版备份不包含各章位置，恢复时会清除现有章节进度。' : '各章位置也会替换为备份中的内容。'}{pendingBackup.favorites.some(id => !words.some(word => word.id === id)) ? '部分收藏不在当前课程中，仍会保留在记录里。' : ''}</p><div className="st-backup-actions"><button onClick={confirmBackup}>确认恢复</button><button onClick={() => setPendingBackup(null)}>取消</button></div></div>}
+        {backupMessage && <p role="status">{backupMessage}</p>}</div>
+      </details>
       <div className="st-settings-links"><button onClick={() => setDialog('keys')}><Keyboard size={17}/>键盘快捷键</button></div>
     </StudyDialog>}
-  </div>
+  </div></>
 }

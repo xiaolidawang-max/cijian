@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --mode static",
     "build": "tsc -b && vite build --mode static",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test tests/content.test.ts tests/storage.test.ts",
+    "audit:content": "node --experimental-strip-types scripts/audit-content.ts"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
