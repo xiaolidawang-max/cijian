@@ -15,6 +15,7 @@ import WordContext from './WordContext'
 import StudySidebar from './StudySidebar'
 import { useMobileLayout } from './useMobileLayout'
 import { useStudyNavigation } from './useStudyNavigation'
+import { saveStudyBackupFile } from './saveStudyBackupFile'
 import type { StudyPage } from './useStudyNavigation'
 import './study.css'
 import './mobileHome.css'
@@ -100,6 +101,7 @@ export default function App() {
   const [audioError, setAudioError] = useState('')
   const [pendingBackup, setPendingBackup] = useState<StudyBackup | null>(null)
   const [backupMessage, setBackupMessage] = useState('')
+  const [exportingBackup, setExportingBackup] = useState(false)
   const audio = useRef<HTMLAudioElement | null>(null)
   const optionsRef = useRef(options)
   optionsRef.current = options
@@ -226,18 +228,15 @@ export default function App() {
   }
 
   async function exportProgress() {
-    let backup: StudyBackup
+    if (exportingBackup) return
+    setExportingBackup(true)
     try {
       // Preserve legacy fields in exported backups without exposing the removed feature.
-      backup = await withStudyLock(() => ({ format:'wordspace-study-backup', version:3, exportedAt:new Date().toISOString(), position:readPosition() || card.id, favorites:readFavorites(), options:readOptions(), reviews:readReviewRecords(), chapterPositions:readChapterPositions(), reviewSession:readReviewSession() }))
-    } catch { setBackupMessage('暂时无法读取完整学习记录，请重试。'); return }
-    const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type:'application/json' }))
-    const link = document.createElement('a')
-    link.href = url
-    link.download = '词间学习记录-' + new Date().toISOString().slice(0, 10) + '.json'
-    link.click()
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-    setBackupMessage('已开始下载学习记录。请妥善保存备份文件。')
+      const backup: StudyBackup = await withStudyLock(() => ({ format:'wordspace-study-backup', version:3, exportedAt:new Date().toISOString(), position:readPosition() || card.id, favorites:readFavorites(), options:readOptions(), reviews:readReviewRecords(), chapterPositions:readChapterPositions(), reviewSession:readReviewSession() }))
+      const result = await saveStudyBackupFile('词间学习记录-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(backup, null, 2))
+      setBackupMessage(result === 'saved' ? '学习记录已保存。' : result === 'cancelled' ? '已取消保存。' : '已开始下载学习记录。请妥善保存备份文件。')
+    } catch { setBackupMessage('未能导出学习记录，请重试。') }
+    finally { setExportingBackup(false) }
   }
   async function chooseBackup(file: File | undefined) {
     setPendingBackup(null)
@@ -379,9 +378,10 @@ export default function App() {
   }
 
   if (!loaded && online) return <div className="st-empty-page" role="status"><BookOpen size={32}/><h1>正在加载课程</h1><p>请稍候，正在读取你的词库。</p></div>
+  if (!loaded) return <div className="st-empty-page" role="alert"><BookOpen size={32}/><h1>词库暂时未能打开</h1><p>学习记录仍保存在本机，请重新读取词库。</p><button onClick={() => window.location.reload()}>重新读取</button></div>
   if (!card || !chapter) return <div className="st-empty-page"><BookOpen size={32}/><h1>暂时没有可学习的词条</h1><p>请检查词库文件后刷新页面。</p></div>
 
-  const notice = !online ? '完整词库暂时未能载入，目前显示内置词条。请刷新页面重试。' : storageError ? '浏览器未能保存学习记录，请检查存储设置。' : undefined
+  const notice = storageError ? '未能保存学习记录，请检查存储设置。' : undefined
   const home = <Home
     title={course.title}
     onHome={() => navigatePage('library')}
@@ -391,14 +391,14 @@ export default function App() {
     chapterTotal={chapterWords.length}
     chapterPosition={position}
     word={card.word}
-    illustration={imageError || !card.imageUrl ? null : <WordIllustration card={card} retry={imageRetry} frames={resources.frames} failed={() => setImageError(true)} decorative cropPhoto/>}
+    illustration={!loaded || imageError || !card.imageUrl ? null : <WordIllustration card={card} retry={imageRetry} frames={resources.frames} failed={() => setImageError(true)} decorative cropPhoto/>}
     totalWords={words.length}
     chapters={course.chapters.map(item => {
       const entries = words.filter(word => word.chapter === item.id)
       const remembered = chapterPositions[item.id] || (hasStarted && card.chapter === item.id ? card.id : '')
       const savedPosition = entries.findIndex(word => word.id === remembered) + 1
       const cover = entries.find(word => word.word === chapterCovers[item.id]) || entries[0]
-      return { id:item.id, name:item.name, count:entries.length, imageUrl:cover?.imageUrl || '', savedPosition }
+      return { id:item.id, name:item.name, count:entries.length, imageUrl:loaded ? cover?.imageUrl || '' : '', savedPosition }
     })}
     notice={notice}
     onStudy={() => goTo(card.id)}
@@ -430,7 +430,7 @@ export default function App() {
 
   return <>{showHome && (page === 'library' ? library : home)}<div className={'st-shell' + (options.largeText ? ' st-large-text' : '') + (showHome ? ' st-overlay-only' : '')} style={{ '--st-picture-size':(options.imageSize ?? 300) + 'px' } as CSSProperties}>
     {!showHome && <a className="st-skip" href="#study-content">跳到当前词卡</a>}
-    <div className="st-workspace" style={{ display:showHome ? 'none' : undefined }}>
+    {loaded && <div className="st-workspace" style={{ display:showHome ? 'none' : undefined }}>
       <header className="st-app-header">
         <button className="st-app-brand" aria-label="返回词间主页" onClick={() => navigatePage('library')}>词间</button>
         <nav aria-label="学习导航">
@@ -498,7 +498,7 @@ export default function App() {
         </div>
       </main>
 
-    </div>
+    </div>}
 
     {mobile && dialog === 'chapters' && <StudyDialog title="章节目录" className="st-chapters-dialog" close={() => setDialog(null)}>
       <StudySidebar chapters={course.chapters} words={words} selectedId={card.id} favorites={favorites} onSelect={goTo}/>
@@ -532,7 +532,7 @@ export default function App() {
       <details className="st-backup">
         <summary>学习记录备份<ChevronDown size={15}/></summary>
         <div className="st-backup-body"><p>保存或恢复学习位置、章节进度、收藏和设置。</p>
-        <div className="st-backup-actions"><button disabled={!loaded} onClick={exportProgress}>导出学习记录</button><button disabled={!loaded} onClick={() => backupInput.current?.click()}>选择备份文件</button><input ref={backupInput} type="file" accept=".json,application/json" hidden onChange={event => void chooseBackup(event.target.files?.[0])}/></div>
+        <div className="st-backup-actions"><button disabled={!loaded || exportingBackup} onClick={exportProgress}>{exportingBackup ? '正在保存…' : '导出学习记录'}</button><button disabled={!loaded} onClick={() => backupInput.current?.click()}>选择备份文件</button><input ref={backupInput} type="file" accept=".json,application/json" hidden onChange={event => void chooseBackup(event.target.files?.[0])}/></div>
         {!loaded && <p>词库加载后可备份学习记录。</p>}
         {pendingBackup && <div className="st-backup-confirm"><p>将恢复 {pendingBackup.favorites.length} 个收藏，并替换当前学习位置和设置。{pendingBackup.version < 3 ? '这份旧版备份不包含各章位置，恢复时会清除现有章节进度。' : '各章位置也会替换为备份中的内容。'}{pendingBackup.favorites.some(id => !words.some(word => word.id === id)) ? '部分收藏不在当前课程中，仍会保留在记录里。' : ''}</p><div className="st-backup-actions"><button onClick={confirmBackup}>确认恢复</button><button onClick={() => setPendingBackup(null)}>取消</button></div></div>}
         {backupMessage && <p role="status">{backupMessage}</p>}</div>

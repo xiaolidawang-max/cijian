@@ -6,16 +6,22 @@
   "scripts": {
     "dev": "vite --mode static",
     "build": "tsc -b && vite build --mode static",
+    "build:android:web": "tsc -b && vite build --mode android && node scripts/prepare-android-assets.mjs --chapters 3",
+    "sync:android": "npm run build:android:web && cap sync android",
     "preview": "vite preview",
     "test": "node --experimental-strip-types --test tests/content.test.ts tests/storage.test.ts",
     "audit:content": "node --experimental-strip-types scripts/audit-content.ts"
   },
   "dependencies": {
+    "@capacitor/android": "8.6.0",
+    "@capacitor/app": "8.1.2",
+    "@capacitor/core": "8.6.0",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.6.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.0",
