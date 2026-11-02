@@ -13,7 +13,12 @@ import Home from './Home'
 import BookLibrary from './BookLibrary'
 import WordContext from './WordContext'
 import StudySidebar from './StudySidebar'
+import { useMobileLayout } from './useMobileLayout'
+import { useStudyNavigation } from './useStudyNavigation'
+import type { StudyPage } from './useStudyNavigation'
 import './study.css'
+import './mobileHome.css'
+import './mobile.css'
 
 const seed: Course = {
   title: '雅思词汇真经', description: '图文刷词 · 打开即学', chapters: originalChapters,
@@ -33,7 +38,6 @@ function readOptions(): StudyOptions {
 }
 const pad = (value: number) => String(value).padStart(2, '0')
 const RESULT_PAGE_SIZE = 60
-type StudyPage = 'library' | 'chapters' | 'study'
 // Use a representative topic image, rather than whichever word happens to be first.
 const chapterCovers:Record<string,string> = { geography:'atmosphere', plants:'vegetation', ch03:'wildlife', ch04:'galaxy', ch05:'university', ch06:'technology', ch07:'civilisation', ch08:'language', ch09:'stadium', ch10:'material', ch11:'fashion', ch12:'diet', ch13:'architecture', ch14:'travel', ch15:'government', ch16:'market', ch17:'law', ch18:'battle', ch19:'couple', ch20:'act', ch21:'brain', ch22:'dawn' }
 
@@ -63,7 +67,11 @@ function StudyDialog({ title, children, close, wide = false, image = false, clas
 }
 
 export default function App() {
-  const [page, setPage] = useState<StudyPage>('library')
+  const mobile = useMobileLayout()
+  const { page, dialog, navigate, setDialog } = useStudyNavigation(mobile, () => {
+    stopAudio()
+    setReadingBar(false)
+  })
   const showHome = page !== 'study'
   const [hasStarted, setHasStarted] = useState(() => !!readPosition())
   const [chapterPositions, setChapterPositions] = useState(readChapterPositions)
@@ -76,7 +84,6 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(readPosition)
   const [favorites, setFavorites] = useState(readFavorites)
   const [options, setOptions] = useState(readOptions)
-  const [dialog, setDialog] = useState<'find' | 'keys' | 'settings' | 'image' | 'end' | null>(null)
   const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [readingBar, setReadingBar] = useState(false)
   const [imageZoom, setImageZoom] = useState(false)
@@ -104,7 +111,10 @@ export default function App() {
   const swipe = useRef<{ x: number; y: number; at: number; id: number } | null>(null)
   const suppressImageTapUntil = useRef(0)
   const backupInput = useRef<HTMLInputElement | null>(null)
-  const historyPage = useRef<StudyPage>('library')
+
+  useEffect(() => {
+    if (!mobile && dialog === 'chapters') setDialog(null)
+  }, [mobile, dialog])
 
   const words = useMemo(() => course.chapters.flatMap(chapter => course.words.filter(word => word.chapter === chapter.id && !word.archived)), [course])
   const index = Math.max(0, words.findIndex(word => word.id === selectedId))
@@ -161,34 +171,9 @@ export default function App() {
 
   const navigatePage = useCallback((destination:StudyPage) => {
     stopAudio()
-    setDialog(null)
     setReadingBar(false)
-    setPage(destination)
-  }, [stopAudio])
-
-  useEffect(() => {
-    // A fresh launch still opens Home; only page changes create browser history.
-    window.history.replaceState({ ...window.history.state, cijianPage: { page:'library', basePage:'library' } }, '')
-    const restorePage = (event: PopStateEvent) => {
-      const entry = event.state?.cijianPage
-      const basePage = entry?.basePage === 'chapters' || entry?.basePage === 'study' ? entry.basePage : entry?.home === false ? 'study' : 'library'
-      // Old review history entries return to the page beneath that removed view.
-      const destination = entry?.page === 'study' || entry?.page === 'chapters' ? entry.page : entry?.page === 'review' ? basePage : 'library'
-      historyPage.current = destination
-      stopAudio()
-      setPage(destination)
-      setDialog(null)
-      setReadingBar(false)
-    }
-    window.addEventListener('popstate', restorePage)
-    return () => window.removeEventListener('popstate', restorePage)
-  }, [stopAudio])
-
-  useEffect(() => {
-    if (historyPage.current === page) return
-    historyPage.current = page
-    window.history.pushState({ ...window.history.state, cijianPage: { page, basePage:page } }, '')
-  }, [page])
+    navigate(destination)
+  }, [navigate, stopAudio])
 
   const playAudioUrl = useCallback((url: string) => {
     if (!url) return
@@ -216,15 +201,14 @@ export default function App() {
     stopAudio()
     setSelectedId(id)
     setHasStarted(true)
-    setPage('study')
+    navigate('study')
     setAnswerOverride(null)
-    setDialog(null)
     setReadingBar(false)
     const word = words.find(item => item.id === id)!
     void savePosition(word.chapter, id, hasStarted && card ? { chapterId:card.chapter, wordId:card.id } : undefined).then(value => { setChapterPositions(value); setStorageError(false) }).catch(() => setStorageError(true))
     main.current?.scrollTo({ top: 0, behavior: 'instant' })
     window.scrollTo({ top: 0, behavior: 'instant' })
-  }, [words, stopAudio, hasStarted, card])
+  }, [words, stopAudio, hasStarted, card, navigate])
   const openFinder = useCallback((scope = chapter?.id || 'all', collection = false) => {
     setQuery('')
     setSearchChapter(scope)
@@ -454,7 +438,7 @@ export default function App() {
           <button aria-current={dialog === 'find' && favoritesOnly ? undefined : 'page'} onClick={() => setDialog(null)}>学习</button>
           <button aria-current={dialog === 'find' && favoritesOnly ? 'page' : undefined} onClick={() => openFinder('all', true)}>收藏</button>
         </nav>
-        <button className="st-icon st-app-settings" aria-label="学习设置" title="学习设置" aria-haspopup="dialog" onClick={() => setDialog('settings')}><Settings size={20}/></button>
+        {!mobile && <button className="st-icon st-app-settings" aria-label="学习设置" title="学习设置" aria-haspopup="dialog" onClick={() => setDialog('settings')}><Settings size={20}/></button>}
       </header>
       {readingBar && <div className="st-reading-bar"><strong>{card.word}</strong><button className="st-icon" aria-label={chineseVisible ? '隐藏中文' : '显示中文'} aria-pressed={chineseVisible} onClick={() => changeOptions({ chinese: !chineseVisible })}>{chineseVisible ? <EyeOff size={18}/> : <Eye size={18}/>}</button><button className={'st-play' + (playing ? ' playing' : '')} disabled={!card.audioUrl} aria-label={playing ? '停止读音' : '播放 ' + card.word + ' 的读音'} onClick={() => { initialFocus.current = true; if (playing) stopAudio(); else playAudio() }}>{playing ? <Pause size={17}/> : <Volume2 size={18}/>}<span>{playing ? '播放中' : '听读音'}</span></button></div>}
       <main className="st-main" ref={main} id="study-content" tabIndex={-1}>
@@ -463,7 +447,7 @@ export default function App() {
           {!!resourceErrors && <p className="st-notice" role="status">部分词典资料未能载入。<button onClick={() => setResourceRetry(value => value + 1)}>重试</button></p>}
           {storageError && <p className="st-notice" role="alert">浏览器未能保存学习记录，本次仍可继续浏览。</p>}
           <div className="st-reading-grid">
-            <StudySidebar key={showHome ? 'home' : 'study'} chapters={course.chapters} words={words} selectedId={card.id} favorites={favorites} onSelect={goTo}/>
+            {!mobile && <StudySidebar key={showHome ? 'home' : 'study'} chapters={course.chapters} words={words} selectedId={card.id} favorites={favorites} onSelect={goTo}/>}
             <div className="st-card-column">
               <article className="st-word-card" aria-label={card.word + ' 词卡'} onTouchStart={event => {
                 const touch = event.touches[0]
@@ -482,7 +466,7 @@ export default function App() {
                 if (target) { suppressImageTapUntil.current = Date.now() + 400; goTo(target.id) }
               }}>
                 <header className="st-card-tools">
-                  <p className="st-card-meta">{chapter.name}<span>·</span>{position} / {chapterWords.length}</p>
+                  {mobile ? <button className="st-card-meta st-mobile-chapter" aria-label={'打开章节目录，' + chapter.name + '，' + position + ' / ' + chapterWords.length} onClick={() => setDialog('chapters')}><span>{chapter.name}</span><small>{position} / {chapterWords.length}</small><ChevronDown size={13}/></button> : <p className="st-card-meta">{chapter.name}<span>·</span>{position} / {chapterWords.length}</p>}
                   <div className="st-card-actions"><button className="st-icon" aria-label={chineseVisible ? '隐藏中文' : '显示中文'} title={chineseVisible ? '隐藏中文（记住选择）' : '显示中文（记住选择）'} aria-pressed={chineseVisible} onClick={() => changeOptions({ chinese: !chineseVisible })}>{chineseVisible ? <EyeOff size={17}/> : <Eye size={17}/>}</button><button className="st-icon st-favorite" aria-label={starred ? '取消收藏单词' : '收藏单词'} title={starred ? '取消收藏' : '收藏单词'} aria-pressed={starred} disabled={favoriteSaving} onClick={toggleFavorite}><Star size={22} fill={starred ? 'currentColor' : 'none'}/></button><button className="st-icon" aria-label="词卡设置" title="词卡设置" aria-haspopup="dialog" onClick={() => setDialog('settings')}><Settings size={19}/></button></div>
                 </header>
                 <div className="st-card-body">
@@ -500,7 +484,7 @@ export default function App() {
         <div className="st-dock-inner">
           <nav className="st-turner" aria-label="切换单词">
             <button aria-label="上一个单词" disabled={!previous} onClick={() => previous && goTo(previous.id)}><ArrowLeft size={19}/><span>{previous && previous.chapter !== card.chapter ? '上一章' : '上一个'}</span></button>
-            <button className="st-dock-directory" aria-label="打开章节与词条" onClick={() => openFinder()}><List size={21}/><span>目录</span></button>
+            <button className="st-dock-directory" aria-label="打开章节与词条" onClick={() => mobile ? setDialog('chapters') : openFinder()}><List size={21}/><span>目录</span></button>
             <button className="next" aria-label={next ? '下一个单词' : '查看本书结尾'} onClick={() => next ? goTo(next.id) : setDialog('end')}><span>{!next ? '已到最后' : next.chapter !== card.chapter ? '下一章' : '下一个'}</span><ArrowRight size={19}/></button>
           </nav>
         </div>
@@ -509,13 +493,16 @@ export default function App() {
               </article>
             </div>
 
-            {!showHome && <WordContext key={card.id} content={study} chineseVisible={chineseVisible} loaded={resourcesLoaded} note={card.note !== card.definitionZh ? card.note : undefined}/>}
+            {!showHome && <WordContext key={card.id} content={study} chineseVisible={chineseVisible} loaded={resourcesLoaded} flowing={mobile} note={card.note !== card.definitionZh ? card.note : undefined}/>}
           </div>
         </div>
       </main>
 
     </div>
 
+    {mobile && dialog === 'chapters' && <StudyDialog title="章节目录" className="st-chapters-dialog" close={() => setDialog(null)}>
+      <StudySidebar chapters={course.chapters} words={words} selectedId={card.id} favorites={favorites} onSelect={goTo}/>
+    </StudyDialog>}
     {dialog === 'find' && <StudyDialog title={favoritesOnly ? '我的收藏' : '章节与词条'} close={() => setDialog(null)} wide>
       <label className="st-finder-input"><Search size={19}/><input type="search" aria-label="搜索单词、中文或搭配" placeholder={favoritesOnly ? '搜索收藏的单词…' : '搜索单词或中文…'} value={query} onChange={event => { setQuery(event.target.value); setResultPage(0) }}/></label>
       <div className="st-finder-meta"><select aria-label="搜索章节" value={searchChapter} onChange={event => { setSearchChapter(event.target.value); setResultPage(0) }}><option value="all">{favoritesOnly ? '全部收藏' : '全书'} · {favoritesOnly ? favoriteCount : words.length} 词</option>{course.chapters.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select><span>找到 {visibleResults.length} 个词条</span></div>

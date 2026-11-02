@@ -53,7 +53,7 @@ export default function Home({ title, onHome, hasStarted, chapter, chapterNumber
     <header className="home-header">
       <div className="home-header-inner">
         <button className="home-brand" onClick={onHome} aria-label="词间主页">词间</button>
-        <button className="home-search" onClick={onDirectory}><Search size={17}/><span>搜索单词、中文释义</span></button>
+        <button className="home-search" onClick={onDirectory} aria-label="搜索单词、中文释义"><Search size={17}/><span>搜索单词、中文释义</span></button>
         <nav className="home-nav" aria-label="主页导航">
           <button onClick={onHome}>首页</button>
           <button aria-current="page" onClick={onStudy}>学习</button>

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { CHAPTER_POSITION_PREFIX, FAVORITES_KEY, OPTIONS_KEY, POSITION_KEY, REVIEW_SESSION_KEY, StudyConflictError, createStudyStore, readChapterPositions, readFavorites, readReviewSession, readStoredReviews, readStudyOptions, savePosition, validStudyOptions } from '../src/studyStorage.ts'
+import { CHAPTER_POSITION_PREFIX, FAVORITES_KEY, OPTIONS_KEY, POSITION_KEY, REVIEW_SESSION_KEY, StudyConflictError, createStudyStore, readChapterPositions, readFavorites, readReviewSession, readStoredReviews, readStudyOptions, savePosition, validStudyOptions, withStudyLock } from '../src/studyStorage.ts'
 import type { ExclusiveRunner, NewReviewSession, StudyOptions } from '../src/studyStorage.ts'
 import { parseStudyBackup, restoreStudyBackup } from '../src/studyBackup.ts'
 import { REVIEW_KEY } from '../src/studyReview.ts'
@@ -22,6 +22,173 @@ function serialLock(): ExclusiveRunner {
 const sessionInput: NewReviewSession = { queue:['atmosphere','photosynthesis'], mode:'recall', scope:'all', filter:'mixed' }
 const options = { chinese:true, auto:false, speed:1, largeText:false }
 const backupBase = { format:'wordspace-study-backup', version:3, exportedAt:'2026-11-01T00:00:00Z', position:'photosynthesis', favorites:['photosynthesis'], options, reviews:{}, chapterPositions:{plants:'photosynthesis'}, reviewSession:null }
+
+function replaceGlobal(name: string, value: unknown) {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, name)
+  Object.defineProperty(globalThis, name, { configurable:true, value })
+  return () => { if (previous) Object.defineProperty(globalThis, name, previous); else Reflect.deleteProperty(globalThis, name) }
+}
+
+// Controlled IDB events exercise lock acquisition/failure paths. Browser-level
+// transaction scheduling and cross-tab exclusion are verified separately.
+function databaseHarness() {
+  type Handler = (() => void) | null
+  const transactions: ReturnType<typeof makeTransaction>[] = []
+  const requests: ReturnType<typeof makeRequest>[] = []
+  let closed = 0
+  const makeTransaction = () => {
+    const gate = { onsuccess:null as Handler }
+    const transaction = {
+      oncomplete:null as Handler, onabort:null as Handler,
+      objectStore:(_name: string) => ({ get:(_key: string) => gate }),
+      abort:() => queueMicrotask(() => transaction.onabort?.()),
+      gate,
+    }
+    return transaction
+  }
+  const database = {
+    onversionchange:null as Handler,
+    createObjectStore:(_name: string) => {},
+    close:() => { closed++ },
+    transaction:(_name: string, mode: string) => {
+      assert.equal(mode, 'readwrite')
+      const transaction = makeTransaction()
+      transactions.push(transaction)
+      return transaction
+    },
+  }
+  const makeRequest = () => ({ result:database, onerror:null as Handler, onblocked:null as Handler, onupgradeneeded:null as Handler, onsuccess:null as Handler })
+  const factory = { open:(_name: string, version: number) => { assert.equal(version, 1); const request = makeRequest(); requests.push(request); return request } }
+  return { factory, requests, transactions, get closed() { return closed } }
+}
+
+test('HTTP fallback waits for the IDB request event before reading or writing existing records', async () => {
+  const harness = databaseHarness(), storage = new MemoryStorage()
+  storage.setItem(FAVORITES_KEY, JSON.stringify(['old']))
+  const restoreNavigator = replaceGlobal('navigator', {}), restoreIDB = replaceGlobal('indexedDB', harness.factory)
+  try {
+    const store = createStudyStore(storage)
+    const pending = store.toggleFavorite('new')
+    assert.deepEqual(readFavorites(storage), ['old'])
+    harness.requests[0].onsuccess?.()
+    assert.deepEqual(readFavorites(storage), ['old'])
+    // Simulate another tab completing its transaction before our gate is granted.
+    storage.setItem(FAVORITES_KEY, JSON.stringify(['old','other-tab']))
+    harness.transactions[0].gate.onsuccess?.()
+    harness.transactions[0].oncomplete?.()
+    assert.deepEqual(await pending, ['old','other-tab','new'])
+    assert.equal(harness.closed, 1)
+  } finally { restoreIDB(); restoreNavigator() }
+})
+
+test('HTTP fallback rejects unavailable, blocked and aborted locks without executing the callback', async () => {
+  const restoreNavigator = replaceGlobal('navigator', {})
+  let called = 0
+  try {
+    for (const factory of [undefined, { open:() => { throw new Error('storage denied') } }]) {
+      const restoreIDB = replaceGlobal('indexedDB', factory)
+      try { await assert.rejects(withStudyLock(() => ++called), /安全保存/) } finally { restoreIDB() }
+    }
+    for (const event of ['onerror','onblocked'] as const) {
+      const harness = databaseHarness(), restoreIDB = replaceGlobal('indexedDB', harness.factory)
+      try {
+        const pending = withStudyLock(() => ++called)
+        const rejected = assert.rejects(pending, /安全保存/)
+        harness.requests[0][event]?.()
+        // A blocked open can succeed later; that must never run a stale operation.
+        harness.requests[0].onsuccess?.()
+        await rejected
+        assert.equal(harness.transactions.length, 0)
+        assert.equal(harness.closed, 1)
+      } finally { restoreIDB() }
+    }
+    const harness = databaseHarness(), restoreIDB = replaceGlobal('indexedDB', harness.factory)
+    try {
+      const pending = withStudyLock(() => ++called), rejected = assert.rejects(pending, /安全保存/)
+      harness.requests[0].onsuccess?.()
+      harness.transactions[0].onabort?.()
+      await rejected
+    } finally { restoreIDB() }
+    assert.equal(called, 0)
+  } finally { restoreNavigator() }
+})
+
+test('HTTP backup failure keeps the existing localStorage rollback and releases the transaction', async () => {
+  const harness = databaseHarness(), storage = new MemoryStorage()
+  storage.setItem(POSITION_KEY, 'old-word')
+  storage.setItem(FAVORITES_KEY, JSON.stringify(['old']))
+  const before = Object.fromEntries(storage.data)
+  storage.failOnce = OPTIONS_KEY
+  const restoreNavigator = replaceGlobal('navigator', {}), restoreIDB = replaceGlobal('indexedDB', harness.factory)
+  try {
+    const pending = restoreStudyBackup(storage, parseStudyBackup(JSON.stringify(backupBase)))
+    const rejected = assert.rejects(pending, /quota/)
+    harness.requests[0].onsuccess?.()
+    harness.transactions[0].gate.onsuccess?.()
+    await rejected
+    assert.deepEqual(Object.fromEntries(storage.data), before)
+    assert.equal(harness.closed, 1)
+  } finally { restoreIDB(); restoreNavigator() }
+})
+
+test('a lock-only IDB abort after a successful write does not report that completed write as failed', async () => {
+  const harness = databaseHarness(), storage = new MemoryStorage()
+  const restoreNavigator = replaceGlobal('navigator', {}), restoreIDB = replaceGlobal('indexedDB', harness.factory)
+  try {
+    const pending = createStudyStore(storage).toggleFavorite('word')
+    harness.requests[0].onsuccess?.()
+    harness.transactions[0].gate.onsuccess?.()
+    harness.transactions[0].onabort?.()
+    assert.deepEqual(await pending, ['word'])
+    assert.deepEqual(readFavorites(storage), ['word'])
+  } finally { restoreIDB(); restoreNavigator() }
+})
+
+test('both lock backends reject asynchronous callbacks and Promise results', async () => {
+  for (const native of [false,true]) {
+    const harness = databaseHarness()
+    const restoreNavigator = replaceGlobal('navigator', native ? { locks:{ request:async (_name: string, _options: unknown, operation: () => unknown) => operation() } } : {})
+    const restoreIDB = replaceGlobal('indexedDB', harness.factory)
+    try {
+      let called = false
+      // Deliberately bypass the synchronous callback type to verify runtime defense.
+      const asyncOperation = (async () => { called = true }) as unknown as () => never
+      await assert.rejects(withStudyLock(asyncOperation), /不能使用异步回调/)
+      assert.equal(called, false)
+      assert.equal(harness.requests.length, 0)
+      const promiseOperation = (() => Promise.resolve(1)) as unknown as () => never
+      const pending = withStudyLock(promiseOperation), rejected = assert.rejects(pending, /不能使用异步回调/)
+      if (!native) {
+        harness.requests[0].onsuccess?.()
+        harness.transactions[0].gate.onsuccess?.()
+      }
+      await rejected
+    } finally { restoreIDB(); restoreNavigator() }
+  }
+})
+
+test('native Web Locks errors reject without bypassing the lock through IndexedDB', async () => {
+  const harness = databaseHarness()
+  const restoreNavigator = replaceGlobal('navigator', { locks:{ request:async () => { throw new Error('lock denied') } } })
+  const restoreIDB = replaceGlobal('indexedDB', harness.factory)
+  try {
+    await assert.rejects(withStudyLock(() => assert.fail('must not run')), /lock denied/)
+    assert.equal(harness.requests.length, 0)
+  } finally { restoreIDB(); restoreNavigator() }
+})
+
+test('legacy session creation and backup restore work without secure-context randomUUID', async () => {
+  const secureRandom = globalThis.crypto.getRandomValues.bind(globalThis.crypto)
+  const restoreCrypto = replaceGlobal('crypto', { getRandomValues:secureRandom })
+  try {
+    const storage = new MemoryStorage(), lock = serialLock(), store = createStudyStore(storage, lock)
+    const session = await store.createReviewSession(sessionInput)
+    assert.match(session.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    const restored = await restoreStudyBackup(storage, parseStudyBackup(JSON.stringify({...backupBase,reviewSession:session})), lock)
+    assert.notEqual(restored?.id, session.id)
+    assert.match(restored!.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  } finally { restoreCrypto() }
+})
 
 test('blocked browser storage does not crash rendering and writes reject asynchronously', async () => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')

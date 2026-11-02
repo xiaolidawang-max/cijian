@@ -23,7 +23,8 @@ export interface ReviewSession {
   updatedAt: number
 }
 export type NewReviewSession = Pick<ReviewSession, 'queue' | 'mode' | 'scope' | 'filter' | 'chapterId'>
-export type ExclusiveRunner = <T>(operation: () => T | Promise<T>) => Promise<T>
+type SynchronousOperation<T> = () => T & (T extends PromiseLike<unknown> ? never : unknown)
+export type ExclusiveRunner = <T>(operation: SynchronousOperation<T>) => Promise<T>
 
 export class StudyConflictError extends Error {
   constructor(message = '这轮练习已在另一个窗口更新，请继续最新进度。') { super(message); this.name = 'StudyConflictError' }
@@ -85,11 +86,86 @@ export function readStudyOptions(storage?: Storage): StudyOptions {
   try { return readValidated(storage ?? localStorage, OPTIONS_KEY, defaults, validStudyOptions) } catch { return defaults }
 }
 
-// The shared lock protects all read-modify-write operations across tabs, including
-// backup restoration. Refuse unsafe writes on older/insecure browser contexts.
+const LOCK_DATABASE = STUDY_LOCK + '.mutex'
+const LOCK_STORE = 'exclusive'
+const SYNC_ONLY = '学习记录保存必须同步完成，不能使用异步回调。'
+const lockUnavailable = () => new Error('浏览器暂时无法安全保存记录，请允许网站存储后重试。')
+
+function runSynchronously<T>(operation: () => T): T {
+  const result = operation()
+  if (result !== null && (typeof result === 'object' || typeof result === 'function') && typeof (result as { then?: unknown }).then === 'function') {
+    // Consume rejected promises without allowing them to become lock results.
+    void Promise.resolve(result).catch(() => {})
+    throw new Error(SYNC_ONLY)
+  }
+  return result
+}
+
+// HTTP LAN pages lack Web Locks. An overlapping IDB readwrite transaction is a
+// cross-tab mutex: only run inside its request event, after the transaction has
+// acquired exclusive access. The database stores no learning data; localStorage
+// keys and writeStudyEntries rollback remain unchanged. Never await in this lock.
+function withIndexedDBLock<T>(operation: () => T): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let request: IDBOpenDBRequest
+    try {
+      if (!globalThis.indexedDB) throw lockUnavailable()
+      request = indexedDB.open(LOCK_DATABASE, 1)
+    } catch { reject(lockUnavailable()); return }
+    let abandoned = false
+    const failOpen = () => { abandoned = true; reject(lockUnavailable()) }
+    request.onerror = failOpen
+    request.onblocked = failOpen
+    request.onupgradeneeded = () => {
+      if (abandoned) { request.transaction?.abort(); return }
+      request.result.createObjectStore(LOCK_STORE)
+    }
+    request.onsuccess = () => {
+      const database = request.result
+      if (abandoned) { database.close(); return }
+      database.onversionchange = () => database.close()
+      try {
+        const transaction = database.transaction(LOCK_STORE, 'readwrite')
+        let succeeded = false
+        let result: T
+        let failure: unknown
+        const finish = () => {
+          database.close()
+          // No IDB data needs committing. An abort after a successful localStorage
+          // operation cannot undo it; do not encourage a destructive toggle retry.
+          if (succeeded) resolve(result)
+          else reject(failure ?? lockUnavailable())
+        }
+        transaction.oncomplete = finish
+        transaction.onabort = finish
+        const gate = transaction.objectStore(LOCK_STORE).get(STUDY_LOCK)
+        gate.onsuccess = () => {
+          try { result = runSynchronously(operation); succeeded = true }
+          catch (error) { failure = error; transaction.abort() }
+        }
+      } catch (error) { database.close(); reject(error) }
+    }
+  })
+}
+
+// All storage callbacks are synchronous. Reject native async functions before
+// invocation, and reject promise/thenable results on both lock implementations.
 export const withStudyLock: ExclusiveRunner = async operation => {
-  if (typeof navigator === 'undefined' || !navigator.locks?.request) throw new Error('当前浏览器不支持安全保存，请使用新版 Edge 或 Chrome 从本地快捷方式打开。')
-  return navigator.locks.request(STUDY_LOCK, { mode:'exclusive' }, operation)
+  if (Object.prototype.toString.call(operation) === '[object AsyncFunction]') throw new Error(SYNC_ONLY)
+  if (typeof navigator !== 'undefined' && navigator.locks?.request) {
+    return navigator.locks.request(STUDY_LOCK, { mode:'exclusive' }, () => runSynchronously(operation))
+  }
+  return withIndexedDBLock(operation)
+}
+
+// getRandomValues is available on HTTP too; retain cryptographic UUID identities
+// for legacy backup sessions without depending on secure-context randomUUID.
+export function createStudyId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
 export function notifyStudyChanges() {
@@ -119,7 +195,10 @@ export function writeStudyEntries(storage: Storage, entries: [string, string | n
 }
 
 export function createStudyStore(storage: Storage, exclusive: ExclusiveRunner = withStudyLock, notify: () => void = notifyStudyChanges) {
-  const mutate = <T>(operation: () => T) => exclusive(() => { const result = operation(); notify(); return result })
+  const mutate: ExclusiveRunner = operation => {
+    const notified: typeof operation = () => { const result = operation(); notify(); return result }
+    return exclusive(notified)
+  }
   const strictSession = () => readValidated(storage, REVIEW_SESSION_KEY, null as ReviewSession | null, (value): value is ReviewSession | null => value === null || validReviewSession(value))
   return {
     toggleFavorite: (id: string) => mutate(() => {
@@ -149,7 +228,7 @@ export function createStudyStore(storage: Storage, exclusive: ExclusiveRunner = 
     createReviewSession: (input: NewReviewSession, expectedId: string | null = null) => mutate(() => {
       const current = strictSession()
       if ((current?.id || null) !== expectedId) throw new StudyConflictError()
-      const session: ReviewSession = { ...input, version:1, id:crypto.randomUUID(), queue:[...input.queue], step:0, updatedAt:Date.now() }
+      const session: ReviewSession = { ...input, version:1, id:createStudyId(), queue:[...input.queue], step:0, updatedAt:Date.now() }
       if (!validReviewSession(session)) throw new Error('本轮练习内容无效，请重新选择词条。')
       storage.setItem(REVIEW_SESSION_KEY, JSON.stringify(session))
       return session

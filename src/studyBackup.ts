@@ -1,6 +1,6 @@
 import { REVIEW_KEY, validReviewRecords } from './studyReview.ts'
 import type { ReviewRecords } from './studyReview.ts'
-import { CHAPTER_POSITION_PREFIX, FAVORITES_KEY, OPTIONS_KEY, POSITION_KEY, REVIEW_SESSION_KEY, notifyStudyChanges, validChapterPositions, validReviewSession, validStudyOptions, withStudyLock, writeStudyEntries } from './studyStorage.ts'
+import { CHAPTER_POSITION_PREFIX, FAVORITES_KEY, OPTIONS_KEY, POSITION_KEY, REVIEW_SESSION_KEY, createStudyId, notifyStudyChanges, validChapterPositions, validReviewSession, validStudyOptions, withStudyLock, writeStudyEntries } from './studyStorage.ts'
 import type { ChapterPositions, ExclusiveRunner, ReviewSession, StudyOptions } from './studyStorage.ts'
 export { FAVORITES_KEY, OPTIONS_KEY, POSITION_KEY } from './studyStorage.ts'
 export type { StudyOptions } from './studyStorage.ts'
@@ -54,7 +54,7 @@ export async function restoreStudyBackup(storage: Storage, backup: StudyBackup, 
     }
     for (const [chapter, word] of Object.entries(value.chapterPositions || {})) changes.set(CHAPTER_POSITION_PREFIX + encodeURIComponent(chapter), word)
     // Rotate identity to invalidate stale grading actions in other open tabs.
-    const session = value.reviewSession ? { ...value.reviewSession, id:crypto.randomUUID(), updatedAt:Date.now() } : null
+    const session = value.reviewSession ? { ...value.reviewSession, id:createStudyId(), updatedAt:Date.now() } : null
     changes.set(REVIEW_SESSION_KEY, session ? JSON.stringify(session) : null)
     writeStudyEntries(storage, [...changes])
     notifyStudyChanges()

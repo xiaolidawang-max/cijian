@@ -57,7 +57,7 @@ export default function BookLibrary({ title, chapterCount, wordCount, hasStarted
       </div>
       {notice && <p className="books-notice" role="status">{notice}</p>}
 
-      <section className="books-resume" aria-label={hasStarted ? '继续上次学习' : '开始学习'}>
+      <section className={'books-resume' + (hasStarted ? ' has-progress' : '')} aria-label={hasStarted ? '继续上次学习' : '开始学习'}>
         <BookCover title={title} small/>
         <div className="books-resume-title"><span>{hasStarted ? '上次学习' : '开始学习'}</span><h2>{title}</h2></div>
         <p className="books-resume-position">{hasStarted ? <>{chapter}<span>·</span><span>{chapterPosition} / {chapterTotal} 词</span></> : '先选择章节，按自己的节奏开始。'}</p>

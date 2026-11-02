@@ -5,7 +5,7 @@ import type { ExampleLine, StudyContent } from './studyContent'
 import './wordContext.css'
 
 type Detail = 'definition' | 'phrases' | 'examples' | 'notes'
-type WordContextProps = { content:StudyContent | null; chineseVisible:boolean; loaded:boolean; note?:string }
+type WordContextProps = { content:StudyContent | null; chineseVisible:boolean; loaded:boolean; note?:string; flowing?:boolean }
 
 function Pager({ index, count, label, onChange }: {index:number; count:number; label:string; onChange:(index:number)=>void}) {
   if (count < 2) return null
@@ -55,7 +55,7 @@ function ExampleSource({ example, chineseVisible }: {example:ExampleLine; chines
   </small>
 }
 
-export default function WordContext({ content, chineseVisible, loaded, note }: WordContextProps) {
+export default function WordContext({ content, chineseVisible, loaded, note, flowing = false }: WordContextProps) {
   const [definitionIndex, setDefinitionIndex] = useState(0)
   const [exampleIndex, setExampleIndex] = useState(0)
   const [detail, setDetail] = useState<Detail | null>(null)
@@ -70,7 +70,8 @@ export default function WordContext({ content, chineseVisible, loaded, note }: W
   const examplePages = examples.length
   const activeExample = Math.min(exampleIndex, Math.max(0, examplePages - 1))
   const definition = definitions[activeDefinition]
-  const visibleExamples = examples.slice(activeExample * examplePageSize, (activeExample + 1) * examplePageSize)
+  const visibleDefinitions = flowing ? definitions : definition ? [definition] : []
+  const visibleExamples = flowing ? examples : examples.slice(activeExample * examplePageSize, (activeExample + 1) * examplePageSize)
   const definitionOverflow = useOverflow(definitionBody, [content, activeDefinition, chineseVisible])
   const phrasesOverflow = useOverflow(phrasesBody, [content, chineseVisible])
   const exampleOverflow = useOverflow(exampleBody, [content, activeExample, chineseVisible])
@@ -79,27 +80,27 @@ export default function WordContext({ content, chineseVisible, loaded, note }: W
   const empty = (what:string) => <p className="wc-empty">{loaded ? '暂无' + what + '。' : '正在加载词典…'}</p>
   const phraseList = <div className="wc-phrases">{phrases.map((phrase, index) => <div key={index}><p lang="en">{phrase.en}</p>{chineseVisible && phrase.zh && <small>{phrase.zh}</small>}</div>)}</div>
 
-  return <aside className="st-context wc-context" aria-label="释义与用法">
+  return <aside className={'st-context wc-context' + (flowing ? ' wc-flowing' : '')} aria-label="释义与用法">
     <header className="wc-heading"><h2>释义与用法</h2></header>
 
     <section className="wc-section wc-definition" aria-label="英文释义">
-      <div className="wc-section-heading"><h3>英文释义</h3><div>{expand('definition', definitionOverflow)}<Pager index={activeDefinition} count={definitions.length} label="词义" onChange={setDefinitionIndex}/></div></div>
+      <div className="wc-section-heading"><h3>英文释义</h3>{!flowing && <div>{expand('definition', definitionOverflow)}<Pager index={activeDefinition} count={definitions.length} label="词义" onChange={setDefinitionIndex}/></div>}</div>
       <div className="wc-copy wc-definition-body" ref={definitionBody} aria-live="polite">
-        {definition ? <><p className="wc-definition-en" lang="en">{definition.pos && <><span className="wc-pos">{definition.pos}</span>{' '}</>}{definition.en}</p>{chineseVisible && definition.zh && <p className="wc-translation">{definition.zh}</p>}</> : empty('英文释义')}
+        {visibleDefinitions.length ? visibleDefinitions.map((item, index) => <div className="wc-definition-item" key={index}><p className="wc-definition-en" lang="en">{item.pos && <><span className="wc-pos">{item.pos}</span>{' '}</>}{item.en}</p>{chineseVisible && item.zh && <p className="wc-translation">{item.zh}</p>}</div>) : empty('英文释义')}
       </div>
     </section>
 
     <section className="wc-section wc-collocations" aria-label="常用搭配">
-      <div className="wc-section-heading"><h3>常用搭配</h3><div>{expand('phrases', phrasesOverflow)}<small>{phrases.length} 组</small></div></div>
+      <div className="wc-section-heading"><h3>常用搭配</h3><div>{!flowing && expand('phrases', phrasesOverflow)}<small>{phrases.length} 组</small></div></div>
       <div className="wc-copy" ref={phrasesBody}>{phrases.length ? phraseList : empty('可用搭配')}</div>
     </section>
 
     <section className="wc-section wc-example" aria-label="语境例句">
-      <div className="wc-section-heading"><h3>语境例句</h3><div>{expand('examples', exampleOverflow)}<Pager index={activeExample} count={examplePages} label="例句" onChange={setExampleIndex}/></div></div>
+      <div className="wc-section-heading"><h3>语境例句</h3>{!flowing && <div>{expand('examples', exampleOverflow)}<Pager index={activeExample} count={examplePages} label="例句" onChange={setExampleIndex}/></div>}</div>
       {visibleExamples.length ? <div className="wc-copy wc-example-stack" ref={exampleBody} aria-live="polite">{visibleExamples.map((example, index) => <blockquote className="wc-example-body" key={activeExample * examplePageSize + index}><p lang="en">{example.en}</p>{chineseVisible && example.zh && <footer>{example.zh}</footer>}</blockquote>)}</div> : empty('可用例句')}
     </section>
 
-    {chineseVisible && note && <footer className="wc-footer"><button type="button" onClick={() => setDetail('notes')}>补充说明</button></footer>}
+    {chineseVisible && note && (flowing ? <section className="wc-section wc-note"><div className="wc-section-heading"><h3>补充说明</h3></div><p>{note}</p></section> : <footer className="wc-footer"><button type="button" onClick={() => setDetail('notes')}>补充说明</button></footer>)}
 
     {detail && <ContextDialog title={titles[detail]} close={() => setDetail(null)}>
       {detail === 'definition' && <div className="wc-full-definitions">{definitions.map((item, index) => <section key={index}><p lang="en">{item.pos && <><span className="wc-pos">{item.pos}</span>{' '}</>}{item.en}</p>{chineseVisible && item.zh && <p className="wc-translation">{item.zh}</p>}</section>)}</div>}
